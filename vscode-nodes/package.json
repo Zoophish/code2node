@@ -1,0 +1,27 @@
+{
+  "name": "blender-nodes-dsl",
+  "displayName": "Blender Nodes DSL",
+  "description": "Syntax highlighting for .nodes and .nodetypes files",
+  "version": "0.1.0",
+  "engines": {
+    "vscode": "^1.60.0"
+  },
+  "categories": ["Programming Languages"],
+  "contributes": {
+    "languages": [
+      {
+        "id": "blender-nodes",
+        "aliases": ["Blender Nodes"],
+        "extensions": [".nodes", ".nodetypes"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "blender-nodes",
+        "scopeName": "source.blender-nodes",
+        "path": "./syntaxes/nodes.tmLanguage.json"
+      }
+    ]
+  }
+}

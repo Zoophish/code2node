@@ -1,0 +1,474 @@
+{
+  "scopeName": "source.blender-nodes",
+  "name": "Blender Nodes DSL",
+  "patterns": [
+    {
+      "include": "#comment"
+    },
+    {
+      "include": "#tree-block"
+    },
+    {
+      "include": "#type-block"
+    },
+    {
+      "include": "#node-block"
+    },
+    {
+      "include": "#frame-block"
+    },
+    {
+      "include": "#expr-block"
+    },
+    {
+      "include": "#repeat-block"
+    },
+    {
+      "include": "#inputs-block"
+    },
+    {
+      "include": "#section-block"
+    },
+    {
+      "include": "#all-tokens"
+    }
+  ],
+  "repository": {
+    "comment": {
+      "match": "#.*$",
+      "name": "comment.line.number-sign.blender-nodes"
+    },
+    "tree-block": {
+      "begin": "^\\s*(tree)\\b(.+?)(\\{)\\s*$",
+      "end": "^\\s*(\\})",
+      "beginCaptures": {
+        "1": {
+          "name": "keyword.control.tree.blender-nodes"
+        },
+        "2": {
+          "patterns": [
+            {
+              "include": "#tree-type"
+            },
+            {
+              "include": "#quoted-string"
+            },
+            {
+              "include": "#bare-name"
+            }
+          ]
+        },
+        "3": {
+          "name": "punctuation.definition.block.begin.blender-nodes"
+        }
+      },
+      "endCaptures": {
+        "1": {
+          "name": "punctuation.definition.block.end.blender-nodes"
+        }
+      },
+      "patterns": [
+        {
+          "include": "#comment"
+        },
+        {
+          "include": "#frame-block"
+        },
+        {
+          "include": "#node-block"
+        },
+        {
+          "include": "#expr-block"
+        },
+        {
+          "include": "#all-tokens"
+        }
+      ]
+    },
+    "type-block": {
+      "begin": "^\\s*(type)\\b(.+?)(\\{)\\s*$",
+      "end": "^\\s*(\\})",
+      "beginCaptures": {
+        "1": {
+          "name": "keyword.control.type.blender-nodes"
+        },
+        "2": {
+          "patterns": [
+            {
+              "include": "#quoted-string"
+            },
+            {
+              "include": "#bare-name"
+            }
+          ]
+        },
+        "3": {
+          "name": "punctuation.definition.block.begin.blender-nodes"
+        }
+      },
+      "endCaptures": {
+        "1": {
+          "name": "punctuation.definition.block.end.blender-nodes"
+        }
+      },
+      "patterns": [
+        {
+          "include": "#comment"
+        },
+        {
+          "include": "#section-block"
+        },
+        {
+          "include": "#all-tokens"
+        }
+      ]
+    },
+    "node-block": {
+      "begin": "^\\s*(node)\\b(.+?)(\\{)\\s*$",
+      "end": "^\\s*(\\})",
+      "beginCaptures": {
+        "1": {
+          "name": "keyword.control.node.blender-nodes"
+        },
+        "2": {
+          "patterns": [
+            {
+              "include": "#location-metadata"
+            },
+            {
+              "include": "#bl-idname"
+            },
+            {
+              "include": "#label-attr"
+            },
+            {
+              "include": "#quoted-string"
+            },
+            {
+              "include": "#bare-name"
+            }
+          ]
+        },
+        "3": {
+          "name": "punctuation.definition.block.begin.blender-nodes"
+        }
+      },
+      "endCaptures": {
+        "1": {
+          "name": "punctuation.definition.block.end.blender-nodes"
+        }
+      },
+      "patterns": [
+        {
+          "include": "#comment"
+        },
+        {
+          "include": "#inputs-block"
+        },
+        {
+          "include": "#all-tokens"
+        }
+      ]
+    },
+    "repeat-block": {
+      "begin": "^\\s*(repeat|closure)\\b(.+?)(\\{)\\s*$",
+      "end": "^\\s*(\\})",
+      "beginCaptures": {
+        "1": {
+          "name": "keyword.control.repeat.blender-nodes"
+        },
+        "2": {
+          "patterns": [
+            {
+              "include": "#location-metadata"
+            },
+            {
+              "include": "#quoted-string"
+            },
+            {
+              "include": "#bare-name"
+            }
+          ]
+        },
+        "3": {
+          "name": "punctuation.definition.block.begin.blender-nodes"
+        }
+      },
+      "endCaptures": {
+        "1": {
+          "name": "punctuation.definition.block.end.blender-nodes"
+        }
+      },
+      "patterns": [
+        {
+          "include": "#comment"
+        },
+        {
+          "include": "#frame-block"
+        },
+        {
+          "include": "#node-block"
+        },
+        {
+          "include": "#expr-block"
+        },
+        {
+          "include": "#inputs-block"
+        },
+        {
+          "include": "#section-block"
+        },
+        {
+          "include": "#all-tokens"
+        }
+      ]
+    },
+    "inputs-block": {
+      "begin": "^\\s*(inputs|outputs)\\s*(\\{)\\s*$",
+      "end": "^\\s*(\\})",
+      "beginCaptures": {
+        "1": {
+          "name": "keyword.control.section.blender-nodes"
+        },
+        "2": {
+          "name": "punctuation.definition.block.begin.blender-nodes"
+        }
+      },
+      "endCaptures": {
+        "1": {
+          "name": "punctuation.definition.block.end.blender-nodes"
+        }
+      },
+      "patterns": [
+        {
+          "include": "#comment"
+        },
+        {
+          "include": "#all-tokens"
+        }
+      ]
+    },
+    "section-block": {
+      "begin": "^\\s*(properties|children|sockets|variant|interface|items)\\b(.*?)(\\{)\\s*$",
+      "end": "^\\s*(\\})",
+      "beginCaptures": {
+        "1": {
+          "name": "keyword.control.section.blender-nodes"
+        },
+        "2": {
+          "patterns": [
+            {
+              "include": "#quoted-string"
+            },
+            {
+              "include": "#bare-name"
+            }
+          ]
+        },
+        "3": {
+          "name": "punctuation.definition.block.begin.blender-nodes"
+        }
+      },
+      "endCaptures": {
+        "1": {
+          "name": "punctuation.definition.block.end.blender-nodes"
+        }
+      },
+      "patterns": [
+        {
+          "include": "#comment"
+        },
+        {
+          "include": "#inputs-block"
+        },
+        {
+          "include": "#all-tokens"
+        }
+      ]
+    },
+    "all-tokens": {
+      "patterns": [
+        {
+          "include": "#location-metadata"
+        },
+        {
+          "include": "#connection-operator"
+        },
+        {
+          "include": "#assignment-operator"
+        },
+        {
+          "include": "#bl-idname"
+        },
+        {
+          "include": "#socket-type"
+        },
+        {
+          "include": "#tree-type"
+        },
+        {
+          "include": "#boolean"
+        },
+        {
+          "include": "#number"
+        },
+        {
+          "include": "#quoted-string"
+        },
+        {
+          "include": "#enum-value"
+        },
+        {
+          "include": "#property-keys"
+        },
+        {
+          "include": "#keywords"
+        }
+      ]
+    },
+    "tree-type": {
+      "match": "\\b\\w+NodeTree\\b",
+      "name": "support.type.tree.blender-nodes"
+    },
+    "quoted-string": {
+      "match": "\"[^\"]*\"",
+      "name": "string.quoted.double.blender-nodes"
+    },
+    "bare-name": {
+      "match": "\\b[A-Za-z_][A-Za-z0-9_.]*\\b",
+      "name": "variable.other.blender-nodes"
+    },
+    "keywords": {
+      "match": "\\b(tree|node|inputs|outputs|properties|sockets|variant|type|interface|input|output|repeat|closure|items|frame|children|reroute|iterations|import|expr)\\b",
+      "name": "keyword.control.blender-nodes"
+    },
+    "property-keys": {
+      "match": "\\b(node_tree|label|mute|hide|description|expression)\\b",
+      "name": "support.variable.property.blender-nodes"
+    },
+    "connection-operator": {
+      "match": "->",
+      "name": "keyword.operator.connection.blender-nodes"
+    },
+    "assignment-operator": {
+      "match": "=",
+      "name": "keyword.operator.assignment.blender-nodes"
+    },
+    "location-metadata": {
+      "match": "@\\([^)]+\\)",
+      "name": "comment.block.location.blender-nodes"
+    },
+    "label-attr": {
+      "match": "\\blabel\\s*=",
+      "name": "support.variable.property.blender-nodes"
+    },
+    "boolean": {
+      "match": "\\b(true|false)\\b",
+      "name": "constant.language.boolean.blender-nodes"
+    },
+    "number": {
+      "match": "-?\\b\\d+(\\.\\d+)?(e[+-]?\\d+)?\\b",
+      "name": "constant.numeric.blender-nodes"
+    },
+    "bl-idname": {
+      "match": "\\[[A-Za-z_]\\w*\\]",
+      "name": "entity.name.type.node.blender-nodes"
+    },
+    "socket-type": {
+      "match": "\\b(NodeSocket\\w+)\\b",
+      "name": "support.type.socket.blender-nodes"
+    },
+    "enum-value": {
+      "match": "\\b[A-Z][A-Z0-9_]{2,}\\b",
+      "name": "constant.other.enum.blender-nodes"
+    },
+    "expr-block": {
+      "begin": "^\\s*(expr)\\b(.+?)(\\{)\\s*$",
+      "end": "^\\s*(\\})",
+      "beginCaptures": {
+        "1": {
+          "name": "keyword.control.expr.blender-nodes"
+        },
+        "2": {
+          "patterns": [
+            {
+              "include": "#location-metadata"
+            },
+            {
+              "include": "#quoted-string"
+            },
+            {
+              "include": "#bare-name"
+            }
+          ]
+        },
+        "3": {
+          "name": "punctuation.definition.block.begin.blender-nodes"
+        }
+      },
+      "endCaptures": {
+        "1": {
+          "name": "punctuation.definition.block.end.blender-nodes"
+        }
+      },
+      "patterns": [
+        {
+          "include": "#comment"
+        },
+        {
+          "include": "#frame-block"
+        },
+        {
+          "include": "#inputs-block"
+        },
+        {
+          "include": "#all-tokens"
+        }
+      ]
+    },
+    "frame-block": {
+      "begin": "^\\s*(frame)\\b(.+?)(\\{)\\s*$",
+      "end": "^\\s*(\\})",
+      "beginCaptures": {
+        "1": {
+          "name": "keyword.control.frame.blender-nodes"
+        },
+        "2": {
+          "patterns": [
+            {
+              "include": "#location-metadata"
+            },
+            {
+              "include": "#label-attr"
+            },
+            {
+              "include": "#quoted-string"
+            },
+            {
+              "include": "#bare-name"
+            }
+          ]
+        },
+        "3": {
+          "name": "punctuation.definition.block.begin.blender-nodes"
+        }
+      },
+      "endCaptures": {
+        "1": {
+          "name": "punctuation.definition.block.end.blender-nodes"
+        }
+      },
+      "patterns": [
+        {
+          "include": "#comment"
+        },
+        {
+          "include": "#inputs-block"
+        },
+        {
+          "include": "#all-tokens"
+        }
+      ]
+    }
+  }
+}

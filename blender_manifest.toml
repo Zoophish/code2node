@@ -1,0 +1,18 @@
+schema_version = "1.0.0"
+
+id = "code2node"
+version = "0.1.0"
+name = "Node IO"
+tagline = "Serialise and deserialise Blender node trees to a text DSL"
+maintainer = "Sam Warren"
+type = "add-on"
+
+blender_version_min = "5.0.0"
+
+license = [
+  "SPDX:GPL-3.0-or-later",
+]
+
+copyright = [
+  "2026 Sam Warren",
+]

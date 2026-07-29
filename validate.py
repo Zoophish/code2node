@@ -10,10 +10,10 @@ properties/enums, out-of-range socket indices, and dangling references before
 bpy ever sees the tree. The registry comes from schema.load_registry
 (registry.json, generated inside Blender by `cli.py schema`).
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .core import (ClosureZoneDef, ITEM_NODES, LinkDef, NodeDef,
-                   RepeatZoneDef, SocketRef, TreeDef)
+                   RepeatZoneDef, SocketRef, TreeDef, ZoneDef)
 from .schema import NodeTypeDef, NodeVariant, SchemaRegistry
 
 # Node types that exist structurally but are not in the per-tree registry,
@@ -60,6 +60,47 @@ def _effective_props(node_def: NodeDef, type_def: NodeTypeDef) -> dict:
 def _interface_names(tree: TreeDef, direction: str) -> list[str]:
     """Socket names of a tree interface side, in index order."""
     return [s.name for s in tree.interface if s.direction == direction]
+
+
+@dataclass
+class _Scope:
+    """One name-visibility region: a tree's top level, or one zone body.
+    Socket refs anywhere in the region resolve against the same names —
+    the pseudo-node (zone scopes only), sibling zone names (their external
+    read sockets), and visible node defs. `own_nodes` are the nodes the
+    region declares; `nodes` adds what a zone body sees of the enclosing
+    tree. Resolution, validation, and the Blender-side builder all treat a
+    region this way; anything a scope lookup rejects cannot build."""
+    tree: TreeDef
+    zone: ZoneDef | None
+    nodes: dict[str, NodeDef]
+    own_nodes: list[NodeDef]
+    links: list[LinkDef]
+    pseudo: str | None = None
+    pseudo_items: list[str] = field(default_factory=list)
+    zone_reads: dict[str, list[str]] = field(default_factory=dict)
+
+
+def _zone_pseudo(zone: ZoneDef) -> tuple[str, list[str]]:
+    if isinstance(zone, RepeatZoneDef):
+        return "repeat", [it.name for it in zone.items]
+    return "closure", [it.name for it in zone.inputs]
+
+
+def _tree_scopes(tree: TreeDef) -> list[_Scope]:
+    top_nodes = {n.name: n for n in tree.nodes}
+    zone_reads = {z.name: [it.name for it in z.items]
+                  if isinstance(z, RepeatZoneDef) else ["Closure"]
+                  for z in tree.zones}
+    scopes = [_Scope(tree, None, top_nodes, tree.nodes, tree.links,
+                     zone_reads=zone_reads)]
+    for zone in tree.zones:
+        nodes = dict(top_nodes)
+        nodes.update({n.name: n for n in zone.nodes})
+        pseudo, pseudo_items = _zone_pseudo(zone)
+        scopes.append(_Scope(tree, zone, nodes, zone.nodes, zone.links,
+                             pseudo, pseudo_items, zone_reads))
+    return scopes
 
 
 def _collect_trees(tree_defs: list[TreeDef]) -> dict[str, TreeDef]:
@@ -144,107 +185,85 @@ class _NameResolver:
 
         return [i for i, n in enumerate(names) if n == name], ""
 
-    def _resolve_ref(self, ref: SocketRef, tree: TreeDef,
-                     nodes_by_name: dict[str, NodeDef], side: str,
+    def _resolve_ref(self, ref: SocketRef, scope: _Scope, side: str,
                      issues: list[Issue]) -> bool:
-        node_def = nodes_by_name.get(ref.node)
+        if side == "out":
+            names = None
+            if ref.node == scope.pseudo:
+                names = scope.pseudo_items
+            elif ref.node in scope.zone_reads:
+                names = scope.zone_reads[ref.node]
+            if names is not None:
+                hits = [i for i, n in enumerate(names) if n == ref.name]
+                if len(hits) == 1:
+                    ref.index = hits[0]
+                    return True
+                issues.append(Issue("error", scope.tree.name, ref.node,
+                                    f"Cannot resolve zone item {ref.name!r}"))
+                return False
+        node_def = scope.nodes.get(ref.node)
         if node_def is None:
-            issues.append(Issue("error", tree.name, ref.node,
+            issues.append(Issue("error", scope.tree.name, ref.node,
                                 f"Name ref ({ref.name!r}) on unknown node"))
             return False
-        indices, err = self._candidate_indices(node_def, tree, ref.name, side)
+        indices, err = self._candidate_indices(node_def, scope.tree, ref.name, side)
         if indices is None or err or len(indices) != 1:
-            issues.append(Issue("error", tree.name, ref.node,
+            issues.append(Issue("error", scope.tree.name, ref.node,
                                 f"Cannot resolve socket name {ref.name!r}: "
                                 f"{err or 'ambiguous'}"))
             return False
         ref.index = indices[0]
         return True
 
-    def _resolve_named_values(self, node_def: NodeDef, tree: TreeDef,
-                              nodes_by_name: dict[str, NodeDef],
+    def _resolve_named_values(self, node_def: NodeDef, scope: _Scope,
                               issues: list[Issue]):
         for sock_name in list(node_def.named_input_values):
             probe = SocketRef(node=node_def.name, index=-1, name=sock_name)
-            if self._resolve_ref(probe, tree, nodes_by_name, "in", issues):
+            if self._resolve_ref(probe, scope, "in", issues):
                 node_def.input_values[probe.index] = \
                     node_def.named_input_values.pop(sock_name)
                 node_def.input_names[probe.index] = sock_name
 
-    def _resolve_outer(self, ref: tuple[str, int, str], tree: TreeDef,
-                       nodes_by_name: dict[str, NodeDef],
-                       issues: list[Issue]) -> tuple[str, int, str]:
-        """Resolve a (node, index, name) triple that a repeat zone header
-        reads from the enclosing tree."""
+    def _resolve_source(self, ref: tuple[str, int, str], scope: _Scope,
+                        issues: list[Issue]) -> tuple[str, int, str]:
+        """Resolve a (node, index, name) source triple — a repeat zone
+        header ref or an output mapping."""
         node_name, index, sock_name = ref
         if index >= 0:
             return ref
         probe = SocketRef(node=node_name, index=index, name=sock_name)
-        self._resolve_ref(probe, tree, nodes_by_name, "out", issues)
+        self._resolve_ref(probe, scope, "out", issues)
         return (node_name, probe.index, sock_name)
 
-    def _resolve_links(self, links: list[LinkDef], tree: TreeDef,
-                       nodes_by_name: dict[str, NodeDef], issues: list[Issue],
-                       pseudo: tuple[str, list[str]] | None = None,
-                       zone_items: dict[str, list[str]] | None = None):
-        def resolve(ref, side):
-            names = None
-            if pseudo is not None and ref.node == pseudo[0]:
-                names = pseudo[1]
-            elif zone_items is not None and ref.node in zone_items:
-                # zone outputs read externally via the zone name
-                names = zone_items[ref.node]
-            if names is not None:
-                hits = [i for i, n in enumerate(names) if n == ref.name]
-                if len(hits) == 1:
-                    ref.index = hits[0]
-                else:
-                    issues.append(Issue("error", tree.name, ref.node,
-                                        f"Cannot resolve zone item {ref.name!r}"))
-            else:
-                self._resolve_ref(ref, tree, nodes_by_name, side, issues)
-
-        for link in links:
-            if link.source.index < 0:
-                resolve(link.source, "out")
-            if link.target.index < 0:
-                resolve(link.target, "in")
-
     def resolve_tree(self, tree: TreeDef, issues: list[Issue]):
-        nodes_by_name = {n.name: n for n in tree.nodes}
-        zone_items: dict[str, list[str]] = {}
-        for z in tree.zones:
-            if isinstance(z, RepeatZoneDef):
-                zone_items[z.name] = [it.name for it in z.items]
-            else:
-                zone_items[z.name] = ["Closure"]
-        self._resolve_links(tree.links, tree, nodes_by_name, issues,
-                            zone_items=zone_items)
-        for node_def in tree.nodes:
-            self._resolve_named_values(node_def, tree, nodes_by_name, issues)
+        scopes = _tree_scopes(tree)
+        top = scopes[0]
 
+        # A repeat zone header reads from outside the zone: its iteration
+        # count and each item's initial value resolve in the top scope.
         for zone in tree.zones:
-            zone_nodes = dict(nodes_by_name)
-            zone_nodes.update({n.name: n for n in zone.nodes})
-            if isinstance(zone, RepeatZoneDef):
-                pseudo = ("repeat", [it.name for it in zone.items])
-                # A zone header reads from outside the zone: its iteration
-                # count and each item's initial value. Those refs take names
-                # like any other, and an unresolved one would link to the
-                # wrong socket.
-                if isinstance(zone.iterations, tuple):
-                    zone.iterations = self._resolve_outer(
-                        zone.iterations, tree, nodes_by_name, issues)
-                for item in zone.items:
-                    if item.initial_connection is not None:
-                        item.initial_connection = self._resolve_outer(
-                            item.initial_connection, tree, nodes_by_name, issues)
-            else:
-                pseudo = ("closure", [it.name for it in zone.inputs])
-            self._resolve_links(zone.links, tree, zone_nodes, issues, pseudo,
-                                zone_items=zone_items)
-            for node_def in zone.nodes:
-                self._resolve_named_values(node_def, tree, zone_nodes, issues)
+            if not isinstance(zone, RepeatZoneDef):
+                continue
+            if isinstance(zone.iterations, tuple):
+                zone.iterations = self._resolve_source(
+                    zone.iterations, top, issues)
+            for item in zone.items:
+                if item.initial_connection is not None:
+                    item.initial_connection = self._resolve_source(
+                        item.initial_connection, top, issues)
+
+        for scope in scopes:
+            for link in scope.links:
+                if link.source.index < 0:
+                    self._resolve_ref(link.source, scope, "out", issues)
+                if link.target.index < 0:
+                    self._resolve_ref(link.target, scope, "in", issues)
+            for node_def in scope.own_nodes:
+                self._resolve_named_values(node_def, scope, issues)
+            if scope.zone is not None:
+                for key, ref in scope.zone.output_mappings.items():
+                    scope.zone.output_mappings[key] = \
+                        self._resolve_source(ref, scope, issues)
 
 
 def resolve_names(tree_defs: list[TreeDef], registry: SchemaRegistry) -> list[Issue]:
@@ -375,56 +394,93 @@ class _TreeValidator:
                     self._warn(name, f"Input {idx} is '{actual}', annotated '{annotated}' — "
                                      "likely wrong index")
 
-    def check_link(self, link: LinkDef, nodes_by_name: dict[str, NodeDef]):
-        # External reads: a repeat zone exposes its carried items, a closure
-        # zone the single Closure socket.
-        zone_counts = {z.name: len(z.items) if isinstance(z, RepeatZoneDef)
-                       else 1 for z in self.tree.zones}
-        for ref, direction in ((link.source, "source"), (link.target, "target")):
-            if direction == "source" and ref.node in zone_counts:
-                # zone outputs read externally via the zone name
-                if ref.index >= zone_counts[ref.node]:
-                    self._error(ref.node, f"Link source: zone output index "
-                                          f"{ref.index} out of range "
-                                          f"(has {zone_counts[ref.node]} items)")
-                continue
-            node_def = nodes_by_name.get(ref.node)
-            if node_def is None:
-                self._error(ref.node, f"Link {direction} references unknown node")
-                continue
-            n_in, n_out = self._socket_counts(node_def)
-            count = n_out if direction == "source" else n_in
-            if count is not None and ref.index >= count:
-                kind = "output" if direction == "source" else "input"
-                self._error(ref.node, f"Link {direction}: {kind} index {ref.index} "
-                                      f"out of range (has {count})")
+    def _output_count(self, node_name: str, scope: _Scope) -> int | None:
+        """Readable output sockets of a name in scope: the pseudo-node's
+        items, a sibling zone's external reads, or a node's outputs. None
+        when unknowable offline; -1 when the name is not in scope."""
+        if node_name == scope.pseudo:
+            return len(scope.pseudo_items)
+        if node_name in scope.zone_reads and node_name not in scope.nodes:
+            return len(scope.zone_reads[node_name])
+        node_def = scope.nodes.get(node_name)
+        if node_def is None:
+            return -1
+        _, n_out = self._socket_counts(node_def)
+        return n_out
+
+    def check_link(self, link: LinkDef, scope: _Scope):
+        count = self._output_count(link.source.node, scope)
+        if count == -1:
+            self._error(link.source.node, "Link source references unknown node")
+        elif count is not None and link.source.index >= count:
+            self._error(link.source.node, f"Link source: output index "
+                                          f"{link.source.index} out of range "
+                                          f"(has {count})")
+
+        node_def = scope.nodes.get(link.target.node)
+        if node_def is None:
+            self._error(link.target.node, "Link target references unknown node")
+            return
+        n_in, _ = self._socket_counts(node_def)
+        if n_in is not None and link.target.index >= n_in:
+            self._error(link.target.node, f"Link target: input index "
+                                          f"{link.target.index} out of range "
+                                          f"(has {n_in})")
+
+    def check_zone(self, scope: _Scope):
+        zone = scope.zone
+        if isinstance(zone, RepeatZoneDef):
+            items = zone.items
+            declared = {it.name for it in items}
+        else:
+            items = zone.inputs + zone.outputs
+            declared = {it.name for it in zone.outputs}
+
+        for item in items:
+            if self.registry.socket_types and \
+                    item.socket_type not in self.registry.socket_types:
+                self._warn(zone.name, f"Zone item '{item.name}': unknown "
+                                      f"socket type '{item.socket_type}'")
+
+        for item_name, (src_name, src_idx, _) in zone.output_mappings.items():
+            if item_name not in declared:
+                self._error(zone.name, f"Output mapping names undeclared "
+                                       f"item '{item_name}'")
+            count = self._output_count(src_name, scope)
+            if count == -1:
+                self._error(zone.name, f"Output '{item_name}' references "
+                                       f"unknown node '{src_name}'")
+            elif count is not None and src_idx >= count:
+                self._error(zone.name, f"Output '{item_name}': index {src_idx} "
+                                       f"out of range on '{src_name}' "
+                                       f"(has {count})")
 
     def run(self):
-        nodes_by_name = {n.name: n for n in self.tree.nodes}
+        # Nodes, zone-inner nodes, and zone names share the builder's
+        # namespace; any collision silently rebinds a name there.
         seen: set[str] = set()
-        for node_def in self.tree.nodes:
-            if node_def.name in seen:
-                self._error(node_def.name, "Duplicate node name")
-            seen.add(node_def.name)
-            self.check_node(node_def)
-
-        for link in self.tree.links:
-            self.check_link(link, nodes_by_name)
-
-        for zone in self.tree.zones:
-            for node_def in zone.nodes:
+        scopes = _tree_scopes(self.tree)
+        for scope in scopes:
+            for node_def in scope.own_nodes:
+                if node_def.name in seen:
+                    self._error(node_def.name, "Duplicate node name")
+                seen.add(node_def.name)
                 self.check_node(node_def)
-            items = zone.items if isinstance(zone, RepeatZoneDef) \
-                else zone.inputs + zone.outputs
-            for item in items:
-                if self.registry.socket_types and \
-                        item.socket_type not in self.registry.socket_types:
-                    self._warn(zone.name, f"Zone item '{item.name}': unknown "
-                                          f"socket type '{item.socket_type}'")
+            if scope.zone is not None:
+                if scope.zone.name in seen:
+                    self._error(scope.zone.name,
+                                "Zone name collides with a node name")
+                seen.add(scope.zone.name)
 
-        self.check_closure_signatures(nodes_by_name)
+        for scope in scopes:
+            for link in scope.links:
+                self.check_link(link, scope)
+            if scope.zone is not None:
+                self.check_zone(scope)
 
-    def check_closure_signatures(self, nodes_by_name: dict[str, NodeDef]):
+        self.check_closure_signatures(scopes)
+
+    def check_closure_signatures(self, scopes: list[_Scope]):
         """Blender matches evaluate items to the closure's items by name at
         evaluation time; a mismatch silently yields the socket default. When
         the closure input is wired from a zone in this document, the check
@@ -433,36 +489,41 @@ class _TreeValidator:
                     if isinstance(z, ClosureZoneDef)}
         if not closures:
             return
-        for link in self.tree.links:
-            node_def = nodes_by_name.get(link.target.node)
-            if node_def is None or node_def.bl_idname != 'NodeEvaluateClosure' \
-                    or link.target.index != 0:
-                continue
-            zone = closures.get(link.source.node)
-            if zone is None:
-                continue
-            for side, declared, zone_side in (
-                    ("input", node_def.input_items, zone.inputs),
-                    ("output", node_def.output_items, zone.outputs)):
-                signature = {it.name: it.socket_type for it in zone_side}
-                for item in declared:
-                    expected = signature.get(item.name)
-                    if expected is None:
-                        self._error(node_def.name,
-                                    f"Evaluate {side} item '{item.name}' is not "
-                                    f"an {side} of closure '{zone.name}' "
-                                    f"(has: {', '.join(signature) or 'none'})")
-                    elif expected != item.socket_type:
-                        self._error(node_def.name,
-                                    f"Evaluate {side} item '{item.name}' is "
-                                    f"[{item.socket_type}]; closure "
-                                    f"'{zone.name}' declares [{expected}]")
-            supplied = {it.name for it in node_def.input_items}
-            for item_name in (it.name for it in zone.inputs):
-                if item_name not in supplied:
-                    self._warn(node_def.name,
-                               f"Closure input '{item_name}' not supplied; "
-                               "it evaluates to its default")
+        for scope in scopes:
+            for link in scope.links:
+                self._check_evaluate_link(link, scope, closures)
+
+    def _check_evaluate_link(self, link: LinkDef, scope: _Scope,
+                             closures: dict[str, ClosureZoneDef]):
+        node_def = scope.nodes.get(link.target.node)
+        if node_def is None or node_def.bl_idname != 'NodeEvaluateClosure' \
+                or link.target.index != 0:
+            return
+        zone = closures.get(link.source.node)
+        if zone is None:
+            return
+        for side, declared, zone_side in (
+                ("input", node_def.input_items, zone.inputs),
+                ("output", node_def.output_items, zone.outputs)):
+            signature = {it.name: it.socket_type for it in zone_side}
+            for item in declared:
+                expected = signature.get(item.name)
+                if expected is None:
+                    self._error(node_def.name,
+                                f"Evaluate {side} item '{item.name}' is not "
+                                f"an {side} of closure '{zone.name}' "
+                                f"(has: {', '.join(signature) or 'none'})")
+                elif expected != item.socket_type:
+                    self._error(node_def.name,
+                                f"Evaluate {side} item '{item.name}' is "
+                                f"[{item.socket_type}]; closure "
+                                f"'{zone.name}' declares [{expected}]")
+        supplied = {it.name for it in node_def.input_items}
+        for item_name in (it.name for it in zone.inputs):
+            if item_name not in supplied:
+                self._warn(node_def.name,
+                           f"Closure input '{item_name}' not supplied; "
+                           "it evaluates to its default")
 
 
 def validate(tree_defs: list[TreeDef], registry: SchemaRegistry) -> list[Issue]:

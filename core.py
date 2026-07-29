@@ -115,7 +115,7 @@ class ZoneDef:
     location: tuple[float, float] = (0.0, 0.0)
     nodes: list[NodeDef] = field(default_factory=list)
     links: list[LinkDef] = field(default_factory=list)
-    output_mappings: dict[str, tuple[str, int]] = field(default_factory=dict)
+    output_mappings: dict[str, tuple[str, int, str]] = field(default_factory=dict)
 
 
 @dataclass
@@ -398,7 +398,7 @@ def _classify_zone_links(links: list[LinkDef], input_name: str, output_name: str
     output mappings; links leaving the zone read from the zone name."""
     inner_links: list[LinkDef] = []
     remaining_links: list[LinkDef] = []
-    output_mappings: dict[str, tuple[str, int]] = {}
+    output_mappings: dict[str, tuple[str, int, str]] = {}
 
     for link in links:
         src, tgt = link.source, link.target
@@ -409,14 +409,17 @@ def _classify_zone_links(links: list[LinkDef], input_name: str, output_name: str
             src_index = src.index - src_offset if src.node == input_name else src.index
             src_node = pseudo if src.node == input_name else src.node
             if tgt.node == output_name:
-                output_mappings[tgt.name] = (src_node, src_index)
+                output_mappings[tgt.name] = (src_node, src_index, src.name)
             else:
                 inner_links.append(LinkDef(
                     source=SocketRef(src_node, src_index, src.name),
                     target=SocketRef(tgt.node, tgt.index, tgt.name),
                 ))
         elif to_in and not from_in:
-            inner_links.append(link)
+            if tgt.node == output_name:
+                output_mappings[tgt.name] = (src.node, src.index, src.name)
+            else:
+                inner_links.append(link)
         elif from_in and not to_in:
             remaining_links.append(LinkDef(
                 source=SocketRef(zone_name, src.index, src.name),
@@ -796,8 +799,13 @@ def _set_frame_parents(tree_def: TreeDef, node_map: dict):
 
 
 # Item collections take short enum identifiers ('FLOAT'); the DSL uses full
-# socket idnames. The mapping is mechanical bar two irregulars.
+# socket idnames. Subtypes (NodeSocketFloatFactor, NodeSocketVectorXYZ, ...)
+# exist only on interfaces — item enums know the base types, so subtypes
+# collapse to theirs.
 _SHORT_TYPE_IRREGULAR = {'NodeSocketBool': 'BOOLEAN', 'NodeSocketColor': 'RGBA'}
+_ITEM_BASE_TYPES = ('Float', 'Int', 'Vector', 'Rotation', 'Matrix', 'String',
+                    'Menu', 'Object', 'Image', 'Geometry', 'Collection',
+                    'Material', 'Texture', 'Bundle', 'Closure', 'Shader')
 
 
 def _short_socket_type(socket_idname: str) -> str:
@@ -805,7 +813,11 @@ def _short_socket_type(socket_idname: str) -> str:
         return _SHORT_TYPE_IRREGULAR[socket_idname]
     if not socket_idname.startswith('NodeSocket'):
         return socket_idname
-    return socket_idname.replace('NodeSocket', '').upper()
+    rest = socket_idname[len('NodeSocket'):]
+    for base in _ITEM_BASE_TYPES:
+        if rest.startswith(base):
+            return base.upper()
+    return rest.upper()
 
 
 def _build_zone_body(zone_def: ZoneDef, pseudo: str, src_offset: int,
@@ -816,42 +828,55 @@ def _build_zone_body(zone_def: ZoneDef, pseudo: str, src_offset: int,
     src_offset (fixed sockets precede the items there)."""
     warnings: list[str] = []
 
-    inner_map = {}
     for node_def in zone_def.nodes:
         node, w = _build_node(node_def, node_tree, existing_trees)
         warnings.extend(w)
-        inner_map[node_def.name] = node
         node_map[node_def.name] = node
 
-    combined = dict(node_map)
-    combined[pseudo] = input_node
-    for link_def in zone_def.links:
-        src = combined.get(link_def.source.node)
-        tgt = combined.get(link_def.target.node)
-        if src is None or tgt is None:
-            warnings.append(f"Zone '{zone_def.name}': failed to wire link")
-            continue
-        src_idx = link_def.source.index + src_offset \
-            if link_def.source.node == pseudo else link_def.source.index
-        if src_idx >= len(src.outputs):
+    scope = dict(node_map)
+    scope[pseudo] = input_node
+
+    def source_socket(node_name: str, index: int, where: str):
+        src = scope.get(node_name)
+        if src is None:
             raise DeserialisationError(
-                f"Zone '{zone_def.name}': output index {src_idx} "
-                f"out of range on '{link_def.source.node}' (has {len(src.outputs)} outputs)"
-            )
+                f"Zone '{zone_def.name}': {where} references unknown node '{node_name}'")
+        if index < 0:
+            raise DeserialisationError(
+                f"Zone '{zone_def.name}': {where} uses a name-based socket ref; "
+                "resolve against a schema registry first (code2node.validate.resolve_names)")
+        idx = index + src_offset if node_name == pseudo else index
+        if idx >= len(src.outputs):
+            raise DeserialisationError(
+                f"Zone '{zone_def.name}': output index {idx} "
+                f"out of range on '{node_name}' (has {len(src.outputs)} outputs)")
+        return src.outputs[idx]
+
+    for link_def in zone_def.links:
+        from_s = source_socket(link_def.source.node, link_def.source.index, "link")
+        tgt = scope.get(link_def.target.node)
+        if tgt is None:
+            raise DeserialisationError(
+                f"Zone '{zone_def.name}': link references unknown node "
+                f"'{link_def.target.node}'")
+        if link_def.target.index < 0:
+            raise DeserialisationError(
+                f"Zone '{zone_def.name}': link uses a name-based socket ref; "
+                "resolve against a schema registry first (code2node.validate.resolve_names)")
         if link_def.target.index >= len(tgt.inputs):
             raise DeserialisationError(
                 f"Zone '{zone_def.name}': input index {link_def.target.index} "
-                f"out of range on '{link_def.target.node}' (has {len(tgt.inputs)} inputs)"
-            )
-        node_tree.links.new(src.outputs[src_idx], tgt.inputs[link_def.target.index])
+                f"out of range on '{link_def.target.node}' (has {len(tgt.inputs)} inputs)")
+        node_tree.links.new(from_s, tgt.inputs[link_def.target.index])
 
-    for item_name, (src_name, src_idx) in zone_def.output_mappings.items():
-        src = inner_map.get(src_name)
-        if src is None:
-            continue
+    for item_name, (src_name, src_idx, _) in zone_def.output_mappings.items():
+        from_s = source_socket(src_name, src_idx, f"output '{item_name}'")
         to_s = output_node.inputs.get(item_name)
-        if src_idx < len(src.outputs) and to_s:
-            node_tree.links.new(src.outputs[src_idx], to_s)
+        if to_s is None:
+            raise DeserialisationError(
+                f"Zone '{zone_def.name}': output mapping names "
+                f"undeclared item '{item_name}'")
+        node_tree.links.new(from_s, to_s)
 
     return warnings
 

@@ -543,7 +543,7 @@ def _p_repeat(s: Stream) -> core.RepeatZoneDef:
                     name_or_ref = entry[1]
                     target = entry[2]
                     key = name_or_ref if isinstance(name_or_ref, str) else name_or_ref.name
-                    zone.output_mappings[key] = (target.node, target.index)
+                    zone.output_mappings[key] = (target.node, target.index, target.name)
         elif _p_body_construct(s, zone.nodes, zone.links):
             pass
         else:
@@ -577,7 +577,7 @@ def _p_closure(s: Stream) -> core.ClosureZoneDef:
                 if entry[0] == "typed_connection":
                     zone.outputs.append(core.NodeItemDef(entry[1], entry[2]))
                     zone.output_mappings[entry[1]] = \
-                        (entry[3].node, entry[3].index)
+                        (entry[3].node, entry[3].index, entry[3].name)
                 elif entry[0] == "typed":
                     zone.outputs.append(core.NodeItemDef(entry[1], entry[2]))
         elif _p_body_construct(s, zone.nodes, zone.links):
@@ -914,8 +914,8 @@ def _emit_repeat(zone: core.RepeatZoneDef, indent: str) -> list[str]:
 
     if zone.output_mappings:
         lines.append(f"{inner}outputs {{")
-        for item_name, (src_name, src_idx) in sorted(zone.output_mappings.items()):
-            lines.append(f'{inner}  {_f(item_name)} -> {_f(src_name)}({src_idx}),')
+        for item_name, mapping in sorted(zone.output_mappings.items()):
+            lines.append(f'{inner}  {_f(item_name)} -> {_fs(SocketRef(*mapping))},')
         lines.append(f"{inner}}}")
 
     if lines and lines[-1] == "":
@@ -947,8 +947,7 @@ def _emit_closure(zone: core.ClosureZoneDef, indent: str) -> list[str]:
             line = f'{inner}  {_f(item.name)}: {_ft(item.socket_type)}'
             mapping = zone.output_mappings.get(item.name)
             if mapping is not None:
-                src_name, src_idx = mapping
-                line += f' -> {_f(src_name)}({src_idx})'
+                line += f' -> {_fs(SocketRef(*mapping))}'
             lines.append(f"{line},")
         lines.append(f"{inner}}}")
 

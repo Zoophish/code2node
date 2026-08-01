@@ -35,8 +35,21 @@
   ],
   "repository": {
     "comment": {
-      "match": "#.*$",
-      "name": "comment.line.number-sign.blender-nodes"
+      "patterns": [
+        {
+          "match": "//.*$",
+          "name": "comment.line.double-slash.blender-nodes"
+        },
+        {
+          "begin": "/\\*",
+          "end": "\\*/",
+          "name": "comment.block.blender-nodes"
+        },
+        {
+          "match": "#\\w+",
+          "name": "keyword.control.directive.blender-nodes"
+        }
+      ]
     },
     "tree-block": {
       "begin": "^\\s*(tree)\\b(.+?)(\\{)\\s*$",

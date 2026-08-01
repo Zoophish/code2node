@@ -1,4 +1,6 @@
-# Node IO
+![](./code2node_title.svg)
+
+# code2node
 
 Serialise and deserialise Blender node trees to a text DSL. Works with any node tree type that derives from Blender's `NodeTree` — shader, geometry, compositor, and custom tree types registered by other addons are all discovered automatically. Intended for LLM and agentic development of node networks.
 
@@ -40,6 +42,20 @@ python3 code2node/cli.py -- roundtrip material.nodes cleaned.nodes
 ```
 
 ## DSL Format
+
+Comments are `//` to end of line and `/* */` blocks.
+
+`#` starts a preprocessor directive. `#define NAME value` substitutes
+`NAME` (whole words, strings and formulas included) through the rest of
+the file. Defines are file-local and may use earlier defines.
+
+```
+#define SEGMENTS 28
+
+node "Line" [GeometryNodeMeshLine] {
+  inputs { (0) = SEGMENTS, }
+}
+```
 
 Sockets are addressed by **index**; the quoted name after the index is an
 annotation for readability. Indices are the structural identifier — get them
@@ -131,6 +147,18 @@ node "My Instance" [ShaderNodeGroup] {
 }
 ```
 
+### Inline Trees
+
+An `inline` tree allows code reuse without manifesting as a datablock in
+Blender: it exists at compile time only, and each instance expands to a
+copy of the body, framed under the instance's name.
+
+```
+inline tree "Add One" [GeometryNodeTree] {
+  ...
+}
+```
+
 ### Imports
 
 A tree name is a datablock identity, as in Blender: defined once, referenced
@@ -156,20 +184,39 @@ resolves a file's full closure; `bh apply` does this automatically.
 
 ### Expressions
 
-An `expr` block compiles a formula to Math nodes inside a frame labelled with
-the source. The final node takes the block's name, so other nodes reference
-`"falloff"(0)` as usual. Functions are standard math shorthand (`sin`,
-`min`, `floor`, `cosh`, …), each a Math operation; operators are
-`+ - * / % ^`; `pi`, `tau` and `e` are named constants; free
-identifiers bind in `inputs` to a connection or a literal. Formula errors
-surface at parse time with the column: `expr "falloff": formula col 14: ...`.
+An `expr` block expands a formula in place to math nodes inside a frame
+labelled with the source. The type is the domain the formula computes in:
+`expr<float>` expands to Math nodes, `expr<int>` to Integer Math and Bit
+Math nodes. The final node takes the block's name, so other nodes reference
+`"falloff"(0)` as usual. Free identifiers bind in `inputs` to a connection or a literal.
+Formula errors surface at parse time with the column:
+`expr "falloff": formula col 14: ...`.
+
+Float functions are standard math shorthand (`sin`, `min`, `floor`,
+`cosh`, …), each a Math operation; operators are `+ - * / % ^`; `pi`,
+`tau` and `e` are named constants. Int functions are `abs`, `sign`, `min`,
+`max`, `pow`, `multiply_add`, `mod`, `div_round`, `div_floor`, `div_ceil`,
+`gcd`, `lcm`, `band`, `bor`, `bxor`, `bnot`, `shift`, `rotate`; operators
+are `+ - * / %` (`^` reads two ways for integers — write `pow()` or
+`bxor()`). In both types `/` and `%` follow the node (truncated) and
+`mod()` is floored, the useful one for cyclic indexing. Int arithmetic
+wraps at 32 bits at runtime; a constant that folds outside that range is a
+compile error. Literals must be whole numbers in an int formula.
 
 ```
-expr "falloff" @(-400, 300) {
+expr<float> "falloff" @(-400, 300) {
   expression = "(cosh(k) - cosh(2*k*u)) / (cosh(k) - 1)"
   inputs {
     "k" = 4.0,
     "u" -> "SepX"(0),
+  }
+}
+
+expr<int> "pla_id" {
+  expression = "mod(parent * 1664525 + (slot + 1) * 1013904223, 65536)"
+  inputs {
+    "parent" -> "Parent ID"(0),
+    "slot" -> "Slot"(0),
   }
 }
 ```

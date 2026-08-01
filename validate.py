@@ -408,7 +408,50 @@ class _TreeValidator:
         _, n_out = self._socket_counts(node_def)
         return n_out
 
-    def check_link(self, link: LinkDef, scope: _Scope):
+    def _float_expr_terminals(self, scope: _Scope) -> set[str]:
+        """Names of float-expression result nodes in scope, identified by
+        their `<name>.expr` frame. Their output is float32; feeding one into
+        an integer socket loses exactness silently at runtime."""
+        out = set()
+        for node_def in scope.nodes.values():
+            if node_def.bl_idname != "NodeFrame" \
+                    or not node_def.name.endswith(".expr"):
+                continue
+            terminal = scope.nodes.get(node_def.name[:-len(".expr")])
+            if terminal and terminal.bl_idname in ("ShaderNodeMath",
+                                                   "ShaderNodeValue"):
+                out.add(terminal.name)
+        return out
+
+    def _input_socket_idname(self, node_def: NodeDef, idx: int) -> str | None:
+        """The bl_idname of a node's input socket, or None when unknowable
+        offline."""
+        if node_def.bl_idname in GROUP_TYPES:
+            ref = self.all_trees.get(node_def.node_tree_name or "")
+            sockets = [s for s in ref.interface
+                       if s.direction == "INPUT"] if ref else []
+            return sockets[idx].socket_type if idx < len(sockets) else None
+        if node_def.bl_idname == "NodeGroupOutput":
+            sockets = [s for s in self.tree.interface
+                       if s.direction == "OUTPUT"]
+            return sockets[idx].socket_type if idx < len(sockets) else None
+        if node_def.bl_idname in ITEM_NODES:
+            offset = ITEM_NODES[node_def.bl_idname][0]
+            items = node_def.input_items
+            if 0 <= idx - offset < len(items):
+                return items[idx - offset].socket_type
+            return None
+        type_def = self.node_types.get(node_def.bl_idname) \
+            or self.global_types.get(node_def.bl_idname)
+        if type_def is None:
+            return None
+        variant, reliable = _active_variant(node_def, type_def)
+        if variant is None or not reliable or idx >= len(variant.inputs):
+            return None
+        return variant.inputs[idx].bl_idname
+
+    def check_link(self, link: LinkDef, scope: _Scope,
+                   float_exprs: set[str] = frozenset()):
         count = self._output_count(link.source.node, scope)
         if count == -1:
             self._error(link.source.node, "Link source references unknown node")
@@ -426,6 +469,15 @@ class _TreeValidator:
             self._error(link.target.node, f"Link target: input index "
                                           f"{link.target.index} out of range "
                                           f"(has {n_in})")
+            return
+
+        if link.source.node in float_exprs and \
+                self._input_socket_idname(node_def, link.target.index) \
+                == "NodeSocketInt":
+            self._warn(link.source.node,
+                       f"Float expression feeds integer input "
+                       f"{link.target.index} of '{link.target.node}'; "
+                       "float32 loses integer exactness — declare expr<int>")
 
     def check_zone(self, scope: _Scope):
         zone = scope.zone
@@ -473,8 +525,9 @@ class _TreeValidator:
                 seen.add(scope.zone.name)
 
         for scope in scopes:
+            float_exprs = self._float_expr_terminals(scope)
             for link in scope.links:
-                self.check_link(link, scope)
+                self.check_link(link, scope, float_exprs)
             if scope.zone is not None:
                 self.check_zone(scope)
 

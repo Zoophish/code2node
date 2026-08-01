@@ -145,6 +145,7 @@ class ImportDef:
 class TreeDef:
     name: str
     bl_idname: str
+    inline: bool = False  # expands at compile time; no runtime datablock
     interface: list[InterfaceSocketDef] = field(default_factory=list)
     nodes: list[NodeDef] = field(default_factory=list)
     links: list[LinkDef] = field(default_factory=list)

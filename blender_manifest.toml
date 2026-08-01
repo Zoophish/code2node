@@ -1,8 +1,8 @@
 schema_version = "1.0.0"
 
 id = "code2node"
-version = "0.1.0"
-name = "Node IO"
+version = "1.0.0"
+name = "Code2Node"
 tagline = "Serialise and deserialise Blender node trees to a text DSL"
 maintainer = "Sam Warren"
 type = "add-on"

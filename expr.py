@@ -2,13 +2,21 @@
 """
 Expression compiler: a formula string lowers to Math nodes inside a frame.
 
-The language is the closure of the Math node under composition: literals,
-bound identifiers, unary minus, the operators + - * / % ^, parentheses, and
-calls in standard math shorthand, each mapping onto a ShaderNodeMath
-operation. Compilation runs
-at document parse time: lexer, Pratt parser, constant folding, common
+Each expression type is the closure of a Math node family under composition:
+literals, bound identifiers, unary minus, operators, parentheses, and calls
+in standard math shorthand, each mapping onto one node operation.
+`expr<float>` is the closure of the float Math node; `expr<int>` of the
+integer math and bit math nodes. Compilation runs at
+document parse time: lexer, Pratt parser, constant folding, common
 subexpression elimination, deterministic emission. The final node takes the
 expression's name, so downstream references resolve like any node's.
+
+Folding computes each operation's mathematical definition at full python
+precision; it does not model the runtime representation (float32 rounding,
+int32 wraparound). Cases the runtime defines but the definition does not
+(division by zero, negative integer exponents) stay nodes, and an integer
+constant that folds outside int32 range is a compile error rather than a
+silent divergence from the wrapping nodes.
 """
 import math
 
@@ -22,8 +30,11 @@ class ExprError(Exception):
         self.col = col
 
 
+INT_MIN, INT_MAX = -2**31, 2**31 - 1
+
+
 # ---------------------------------------------------------------------------
-# Operation tables
+# Float tables: the float Math node closure
 # ---------------------------------------------------------------------------
 
 # operation -> arity, keyed by the ShaderNodeMath enum.
@@ -92,6 +103,169 @@ PYFOLD = {
 
 
 # ---------------------------------------------------------------------------
+# Int tables: the integer math + bit math node closure
+# ---------------------------------------------------------------------------
+# The two enums share no names, so one operation namespace covers both.
+# Semantics measured in Blender 5.1.1: DIVIDE truncates toward zero,
+# DIVIDE_ROUND rounds half away from zero, MODULO is truncated and
+# FLOORED_MODULO floored (matching the float surface's `%`/`mod` split),
+# x/0 and x%0 are 0, POWER with a negative exponent is 0, GCD/LCM take
+# absolute values, and overflow wraps two's complement. SHIFT is left for
+# positive counts and a *logical* right shift for negative; ROTATE is a
+# 32-bit rotate, negative counts rotating right.
+
+INT_ARITY = {
+    'ADD': 2, 'SUBTRACT': 2, 'MULTIPLY': 2, 'DIVIDE': 2, 'MULTIPLY_ADD': 3,
+    'ABSOLUTE': 1, 'NEGATE': 1, 'POWER': 2, 'MINIMUM': 2, 'MAXIMUM': 2,
+    'SIGN': 1, 'DIVIDE_ROUND': 2, 'DIVIDE_FLOOR': 2, 'DIVIDE_CEIL': 2,
+    'FLOORED_MODULO': 2, 'MODULO': 2, 'GCD': 2, 'LCM': 2,
+    'AND': 2, 'OR': 2, 'XOR': 2, 'NOT': 1, 'SHIFT': 2, 'ROTATE': 2,
+}
+
+INT_FUNCTIONS = {
+    'abs': 'ABSOLUTE', 'sign': 'SIGN', 'min': 'MINIMUM', 'max': 'MAXIMUM',
+    'pow': 'POWER', 'multiply_add': 'MULTIPLY_ADD',
+    'mod': 'FLOORED_MODULO',
+    'div_round': 'DIVIDE_ROUND', 'div_floor': 'DIVIDE_FLOOR',
+    'div_ceil': 'DIVIDE_CEIL', 'gcd': 'GCD', 'lcm': 'LCM',
+    'band': 'AND', 'bor': 'OR', 'bxor': 'XOR', 'bnot': 'NOT',
+    'shift': 'SHIFT', 'rotate': 'ROTATE',
+}
+
+INT_BINOPS = {'+': 'ADD', '-': 'SUBTRACT', '*': 'MULTIPLY', '/': 'DIVIDE',
+              '%': 'MODULO'}
+
+
+def _tdiv(a, b):
+    q = abs(a) // abs(b)
+    return q if (a < 0) == (b < 0) else -q
+
+
+def _int_pow(a, b):
+    if b < 0:
+        raise ValueError  # runtime defines it (0); stays a node
+    return a ** b
+
+
+INT_PYFOLD = {
+    'ADD': lambda a, b: a + b, 'SUBTRACT': lambda a, b: a - b,
+    'MULTIPLY': lambda a, b: a * b, 'MULTIPLY_ADD': lambda a, b, c: a * b + c,
+    'DIVIDE': _tdiv,
+    'DIVIDE_ROUND': lambda a, b: _tdiv(2 * a + (b if (a < 0) == (b < 0)
+                                                else -b), 2 * b),
+    'DIVIDE_FLOOR': lambda a, b: a // b,
+    'DIVIDE_CEIL': lambda a, b: -((-a) // b),
+    'MODULO': lambda a, b: a - _tdiv(a, b) * b,
+    'FLOORED_MODULO': lambda a, b: a % b,
+    'POWER': _int_pow, 'MINIMUM': min, 'MAXIMUM': max,
+    'ABSOLUTE': abs, 'NEGATE': lambda a: -a,
+    'SIGN': lambda a: (a > 0) - (a < 0),
+    'GCD': math.gcd, 'LCM': math.lcm,
+    'AND': lambda a, b: a & b, 'OR': lambda a, b: a | b,
+    'XOR': lambda a, b: a ^ b, 'NOT': lambda a: ~a,
+    # SHIFT and ROTATE are representation operations; they stay nodes.
+}
+
+
+# ---------------------------------------------------------------------------
+# Backends
+# ---------------------------------------------------------------------------
+
+# bl_idname -> default operation (the property is omitted when it matches).
+_DEFAULT_OP = {'ShaderNodeMath': 'ADD', 'FunctionNodeIntegerMath': 'ADD',
+               'FunctionNodeBitMath': 'AND'}
+
+# BitMath's third socket is Shift; two-argument SHIFT/ROTATE skip socket 1.
+_INT_OPS = {}
+for _op, _ar in INT_ARITY.items():
+    if _op in ('AND', 'OR', 'XOR'):
+        _INT_OPS[_op] = ('FunctionNodeBitMath', (0, 1), ('A', 'B'))
+    elif _op == 'NOT':
+        _INT_OPS[_op] = ('FunctionNodeBitMath', (0,), ('A',))
+    elif _op in ('SHIFT', 'ROTATE'):
+        _INT_OPS[_op] = ('FunctionNodeBitMath', (0, 2), ('A', 'Shift'))
+    else:
+        _INT_OPS[_op] = ('FunctionNodeIntegerMath', tuple(range(_ar)),
+                         ('Value',) * _ar)
+
+
+class _Backend:
+    """One expression type: its surface language and its target nodes."""
+
+    def __init__(self, name, binops, functions, arity, pyfold, constants, ops):
+        self.name = name
+        self.binops = binops
+        self.functions = functions
+        self.arity = arity
+        self.pyfold = pyfold
+        self.constants = constants
+        self.ops = ops   # OP -> (bl_idname, input socket indices, input names)
+
+    def binop(self, token, col):
+        op = self.binops.get(token)
+        if op is None:
+            raise ExprError(f"'{token}' is not an operator in {self.name} "
+                            "expressions", col)
+        return op
+
+    def literal(self, value, col):
+        return float(value)
+
+    def fold_result(self, value, col):
+        return float(value)
+
+    def negate(self, operand, col):
+        return ('call', 'MULTIPLY', [('num', -1.0), operand], col)
+
+    def const_node(self, name, value):
+        node = NodeDef(name=name, bl_idname='ShaderNodeValue')
+        node.output_values[0] = value
+        node.output_names[0] = "Value"
+        return node
+
+
+class _IntBackend(_Backend):
+    def binop(self, token, col):
+        if token == '^':
+            raise ExprError("'^' is power in float expressions and would be "
+                            "ambiguous here; use pow() or bxor()", col)
+        return super().binop(token, col)
+
+    def literal(self, value, col):
+        if not float(value).is_integer():
+            raise ExprError(f"'{value}' is not an integer", col)
+        value = int(value)
+        if not INT_MIN <= value <= INT_MAX:
+            raise ExprError(f"{value} overflows a 32-bit integer", col)
+        return value
+
+    def fold_result(self, value, col):
+        value = int(value)
+        if not INT_MIN <= value <= INT_MAX:
+            raise ExprError(f"constant folds to {value}, which overflows a "
+                            "32-bit integer", col)
+        return value
+
+    def negate(self, operand, col):
+        return ('call', 'NEGATE', [operand], col)
+
+    def const_node(self, name, value):
+        return NodeDef(name=name, bl_idname='FunctionNodeInputInt',
+                       properties={'integer': int(value)})
+
+
+BACKENDS = {
+    'float': _Backend(
+        'float', BINOPS, FUNCTIONS, ARITY, PYFOLD, CONSTANTS,
+        {op: ('ShaderNodeMath', tuple(range(ar)), ('Value',) * ar)
+         for op, ar in ARITY.items()}),
+    'int': _IntBackend(
+        'int', INT_BINOPS, INT_FUNCTIONS, INT_ARITY, INT_PYFOLD, {},
+        _INT_OPS),
+}
+
+
+# ---------------------------------------------------------------------------
 # Lexer
 # ---------------------------------------------------------------------------
 
@@ -132,8 +306,9 @@ def _lex(text: str):
 # ---------------------------------------------------------------------------
 
 class _Parser:
-    def __init__(self, tokens):
+    def __init__(self, tokens, backend):
         self.tokens = tokens
+        self.backend = backend
         self.pos = 0
 
     def peek(self):
@@ -168,28 +343,29 @@ class _Parser:
                 return left
             self.next()
             right = self.expression(prec if right_assoc else prec + 1)
-            left = ('call', BINOPS[t[0]], [left, right], t[2])
+            left = ('call', self.backend.binop(t[0], t[2]), [left, right], t[2])
 
     def atom(self):
         t = self.next()
         if t[0] == 'num':
-            return ('num', t[1])
+            return ('num', self.backend.literal(t[1], t[2]))
         if t[0] == '-':
             operand = self.expression(UNARY_PRECEDENCE)
             if operand[0] == 'num':
                 return ('num', -operand[1])
-            return ('call', 'MULTIPLY', [('num', -1.0), operand], t[2])
+            return self.backend.negate(operand, t[2])
         if t[0] == '(':
             inner = self.expression(0)
             self.expect(')')
             return inner
         if t[0] == 'ident':
             if self.peek()[0] == '(':
-                op = FUNCTIONS.get(t[1])
+                op = self.backend.functions.get(t[1])
                 if op is None:
                     raise ExprError(
-                        f"unknown function '{t[1]}'; available: "
-                        f"{', '.join(sorted(FUNCTIONS))}", t[2])
+                        f"unknown function '{t[1]}' in {self.backend.name} "
+                        f"expressions; available: "
+                        f"{', '.join(sorted(self.backend.functions))}", t[2])
                 self.next()
                 args = []
                 if self.peek()[0] != ')':
@@ -198,9 +374,9 @@ class _Parser:
                         self.next()
                         args.append(self.expression(0))
                 self.expect(')')
-                if len(args) != ARITY[op]:
+                if len(args) != self.backend.arity[op]:
                     raise ExprError(
-                        f"{t[1]}() takes {ARITY[op]} argument(s), "
+                        f"{t[1]}() takes {self.backend.arity[op]} argument(s), "
                         f"got {len(args)}", t[2])
                 return ('call', op, args, t[2])
             return ('var', t[1], t[2])
@@ -211,16 +387,18 @@ class _Parser:
 # Folding and emission
 # ---------------------------------------------------------------------------
 
-def _fold(ast):
+def _fold(ast, backend):
     if ast[0] != 'call':
         return ast
-    args = [_fold(a) for a in ast[2]]
-    impl = PYFOLD.get(ast[1])
+    args = [_fold(a, backend) for a in ast[2]]
+    impl = backend.pyfold.get(ast[1])
     if impl and all(a[0] == 'num' for a in args):
         try:
-            return ('num', float(impl(*[a[1] for a in args])))
+            value = impl(*[a[1] for a in args])
         except (ValueError, ZeroDivisionError, OverflowError):
-            pass
+            value = None
+        if value is not None:
+            return ('num', backend.fold_result(value, ast[3]))
     return ('call', ast[1], args, ast[3])
 
 
@@ -241,16 +419,17 @@ def _key(ast):
 
 
 def compile_expression(name: str, formula: str, bindings: dict,
-                       location=(0.0, 0.0)):
+                       location=(0.0, 0.0), dtype: str = 'float'):
     """Lower a formula to (nodes, links). `bindings` maps identifier ->
     SocketRef (connection) or literal. Nodes comprise the Math nodes, the
     final one named `name`, and a frame labelled with the formula."""
-    ast = _Parser(_lex(formula)).parse()
+    backend = BACKENDS[dtype]
+    ast = _Parser(_lex(formula), backend).parse()
 
     # Binding checks run on the raw tree, before substitution erases vars.
     free: dict = {}
     _free_vars(ast, free)
-    missing = sorted(set(free) - set(bindings) - set(CONSTANTS))
+    missing = sorted(set(free) - set(bindings) - set(backend.constants))
     if missing:
         raise ExprError(f"unbound identifier(s): {', '.join(missing)}",
                         min(free[m] for m in missing))
@@ -265,32 +444,29 @@ def compile_expression(name: str, formula: str, bindings: dict,
         if node[0] == 'var':
             if node[1] in bindings:
                 if not isinstance(bindings[node[1]], SocketRef):
-                    return ('num', float(bindings[node[1]]))
-            elif node[1] in CONSTANTS:
-                return ('num', CONSTANTS[node[1]])
+                    return ('num', backend.literal(bindings[node[1]], node[2]))
+            elif node[1] in backend.constants:
+                return ('num', backend.constants[node[1]])
         if node[0] == 'call':
             return ('call', node[1], [substitute(a) for a in node[2]], node[3])
         return node
 
-    ast = _fold(substitute(ast))
+    ast = _fold(substitute(ast), backend)
 
     nodes: list[NodeDef] = []
     links: list[LinkDef] = []
 
     if ast[0] != 'call':
         # Whole formula folded to a constant (or is a lone identifier).
-        value = ast[1] if ast[0] == 'num' else None
-        node = NodeDef(name=name, bl_idname='ShaderNodeValue')
-        if value is not None:
-            node.output_values[0] = value
-            node.output_names[0] = "Value"
+        if ast[0] == 'num':
+            nodes.append(backend.const_node(name, ast[1]))
         else:
             binding = bindings[ast[1]]
             if isinstance(binding, SocketRef):
                 raise ExprError("formula is a bare identifier; reference the "
                                 "source directly instead", ast[2])
-            node.output_values[0] = binding
-        nodes.append(node)
+            nodes.append(backend.const_node(
+                name, backend.literal(binding, ast[2])))
     else:
         emitted: dict = {}   # cse key -> (node name, depth)
         counter = [0]
@@ -304,11 +480,14 @@ def compile_expression(name: str, formula: str, bindings: dict,
             else:
                 counter[0] += 1
                 node_name = f"{name}.{counter[0]}"
-            node = NodeDef(name=node_name, bl_idname='ShaderNodeMath',
-                           properties={'operation': node_ast[1]}
-                           if node_ast[1] != 'ADD' else {})
+            op = node_ast[1]
+            bl_idname, sockets, socket_names = backend.ops[op]
+            node = NodeDef(name=node_name, bl_idname=bl_idname,
+                           properties={'operation': op}
+                           if op != _DEFAULT_OP[bl_idname] else {})
             depth = 0
-            for idx, arg in enumerate(node_ast[2]):
+            for pos, arg in enumerate(node_ast[2]):
+                idx = sockets[pos]
                 if arg[0] == 'num':
                     node.input_values[idx] = arg[1]
                 elif arg[0] == 'var':
@@ -316,16 +495,16 @@ def compile_expression(name: str, formula: str, bindings: dict,
                     if isinstance(binding, SocketRef):
                         links.append(LinkDef(
                             source=binding,
-                            target=SocketRef(node_name, idx, "Value")))
+                            target=SocketRef(node_name, idx, socket_names[pos])))
                     else:
-                        node.input_values[idx] = binding
-                    node.input_names[idx] = "Value"
+                        node.input_values[idx] = backend.literal(binding, node_ast[3])
+                    node.input_names[idx] = socket_names[pos]
                 else:
                     child_name, child_depth = emit(arg, False)
                     depth = max(depth, child_depth + 1)
                     links.append(LinkDef(
                         source=SocketRef(child_name, 0, "Value"),
-                        target=SocketRef(node_name, idx, "Value")))
+                        target=SocketRef(node_name, idx, socket_names[pos])))
             nodes.append(node)
             emitted[key] = (node_name, depth)
             return node_name, depth

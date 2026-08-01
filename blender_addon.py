@@ -5,7 +5,7 @@ import bpy
 from bpy.props import BoolProperty, StringProperty
 from bpy_extras.io_utils import ExportHelper, ImportHelper
 
-from . import core, format, schema
+from . import core, expand, format, loader, schema, validate
 from .core import NodeIOError
 
 
@@ -67,16 +67,27 @@ class NODEIO_OT_Import(bpy.types.Operator, ImportHelper):
 
     def execute(self, context):
         try:
-            with open(self.filepath, 'r', encoding='utf-8') as f:
-                text = f.read()
-        except OSError as e:
-            self.report({'ERROR'}, f"Cannot read file: {e}")
+            # Resolves import statements relative to the file: the closure
+            # arrives as a flat list in build order, document trees last.
+            tree_defs = loader.load(self.filepath)
+        except NodeIOError as e:
+            self.report({'ERROR'}, f"Import failed: {e}")
+            return {'CANCELLED'}
+
+        errors = [i for i in validate.resolve_names(tree_defs, None)
+                  if i.severity == "error"]
+        if errors:
+            for issue in errors:
+                self.report({'ERROR'}, str(issue))
             return {'CANCELLED'}
 
         try:
-            tree_defs = format.deserialise(text)
+            tree_defs = expand.expand_inlines(tree_defs)
         except NodeIOError as e:
-            self.report({'ERROR'}, f"Parse failed: {e}")
+            self.report({'ERROR'}, f"Import failed: {e}")
+            return {'CANCELLED'}
+        if not tree_defs:
+            self.report({'ERROR'}, "Document contains only inline trees")
             return {'CANCELLED'}
 
         existing = {nt.name: nt for nt in bpy.data.node_groups}
@@ -84,8 +95,12 @@ class NODEIO_OT_Import(bpy.types.Operator, ImportHelper):
 
         # The last tree in the file is the root — import it into the active
         # node tree if available, so it replaces the current material rather
-        # than creating a detached node group.
+        # than creating a detached node group. Only a target of the same
+        # tree type can receive it.
         target_tree = self._get_active_tree(context)
+        if target_tree is not None and \
+                target_tree.bl_idname != tree_defs[-1].bl_idname:
+            target_tree = None
 
         try:
             for tree_def in tree_defs:

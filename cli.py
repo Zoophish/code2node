@@ -158,6 +158,13 @@ def cmd_validate(filepath, schema_path=None):
             print(f"  {issue}")
         errors = sum(1 for i in issues if i.severity == "error")
         warnings = len(issues) - errors
+        if not errors:
+            from . import expand
+            try:
+                expand.expand_inlines(tree_defs)
+            except expand.ExpandError as e:
+                print(f"  EXPAND ERROR: {e}")
+                errors += 1
         if errors:
             print(f"FAILED: {errors} error(s), {warnings} warning(s)")
             sys.exit(1)

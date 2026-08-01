@@ -11,6 +11,7 @@ import re
 from typing import Any
 
 from . import core as core
+from . import preprocessor
 from .core import NodeIOError, SocketRef
 
 SCHEMA_README = """\
@@ -46,9 +47,10 @@ class ParseError(NodeIOError):
 # ---------------------------------------------------------------------------
 
 TOKEN_RE = re.compile(r"""
-    (?P<COMMENT>    \#[^\n]*)                      |
+    (?P<COMMENT>    //[^\n]* | /\*(?s:.*?)\*/)     |
     (?P<STRING>     "[^"]*")                       |
     (?P<TYPE>       \[[A-Za-z_]\w*\])              |
+    (?P<TYPEPARAM>  <[A-Za-z_]\w*>)                |
     (?P<TRANSFORM>  @\([^)]+\))                    |
     (?P<ARROW>      ->)                            |
     (?P<LBRACE>     \{)                            |
@@ -61,13 +63,14 @@ TOKEN_RE = re.compile(r"""
     (?P<DOT>        \.)                            |
     (?P<NUMBER>     -?\d+(?:\.\d+)?(?:e[+-]?\d+)?) |
     (?P<WORD>       [A-Za-z_]\w*)                  |
-    (?P<SKIP>       \s+)
+    (?P<SKIP>       \s+)                           |
+    (?P<BAD>        .)
 """, re.VERBOSE)
 
 KEYWORDS = frozenset({
     'tree', 'node', 'frame', 'reroute', 'repeat', 'closure',
     'interface', 'inputs', 'outputs', 'items', 'children',
-    'import', 'expr',
+    'import', 'expr', 'inline',
     'true', 'false',
 })
 
@@ -89,11 +92,13 @@ def tokenise(text: str) -> list[Token]:
         value = m.group()
         if kind in ('SKIP', 'COMMENT'):
             continue
+        if kind == 'BAD':
+            raise ParseError(f"unexpected character {value!r}", m.start())
         if kind == 'WORD' and value in KEYWORDS:
             kind = 'KW'
         elif kind == 'STRING':
             value = value[1:-1]
-        elif kind == 'TYPE':
+        elif kind in ('TYPE', 'TYPEPARAM'):
             value = value[1:-1]
         tokens.append(Token(kind, value, m.start()))
     return tokens
@@ -421,13 +426,22 @@ def _p_reroute(s: Stream) -> tuple[core.NodeDef, core.LinkDef | None]:
 def _p_expr(s: Stream) -> tuple[list[core.NodeDef], list[core.LinkDef]]:
     """Parse and compile an expression block.
 
-    Grammar: `expr` name transform? `{` (`expression` `=` STRING | `inputs`
-    entries)* `}`. The formula compiles here — errors carry the file position
-    of the expression entry plus the column inside the formula.
+    Grammar: `expr` `<`type`>` name transform? `{` (`expression` `=` STRING |
+    `inputs` entries)* `}`. The type is the domain the formula computes in
+    and is required. The formula compiles here — errors carry the file
+    position of the expression entry plus the column inside the formula.
     """
     from . import expr as expr_mod
 
-    s.expect('KW', 'expr')
+    kw = s.expect('KW', 'expr')
+    if not s.at('TYPEPARAM'):
+        raise ParseError("expr requires a type: expr<float> or expr<int>",
+                         kw.pos)
+    tok = s.next()
+    dtype = tok.value
+    if dtype not in expr_mod.BACKENDS:
+        raise ParseError(f"unknown expression type '<{dtype}>'; available: "
+                         f"{', '.join(sorted(expr_mod.BACKENDS))}", tok.pos)
     name = _p_name(s)
     location, _, _ = _p_transform(s)
     s.expect('LBRACE')
@@ -456,7 +470,8 @@ def _p_expr(s: Stream) -> tuple[list[core.NodeDef], list[core.LinkDef]]:
     if formula is None:
         raise ParseError(f"expr \"{name}\" has no expression entry", formula_pos)
     try:
-        return expr_mod.compile_expression(name, formula, bindings, location)
+        return expr_mod.compile_expression(name, formula, bindings, location,
+                                           dtype)
     except expr_mod.ExprError as e:
         raise ParseError(
             f"expr \"{name}\": formula col {e.col}: {e.msg}", formula_pos)
@@ -590,12 +605,15 @@ def _p_closure(s: Stream) -> core.ClosureZoneDef:
 
 
 def _p_tree(s: Stream) -> core.TreeDef:
+    inline = s.at_kw('inline')
+    if inline:
+        s.next()
     s.expect('KW', 'tree')
     name = _p_name(s)
     bl_idname = _p_type(s)
 
     s.expect('LBRACE')
-    tree_def = core.TreeDef(name=name, bl_idname=bl_idname)
+    tree_def = core.TreeDef(name=name, bl_idname=bl_idname, inline=inline)
 
     while not s.at('RBRACE'):
         if s.at_kw('interface'):
@@ -663,12 +681,12 @@ def _p_import(s: Stream) -> list[core.ImportDef]:
 
 
 def parse_document(text: str) -> core.DocumentDef:
-    s = Stream(tokenise(text))
+    s = Stream(tokenise(preprocessor.preprocess(text)))
     doc = core.DocumentDef()
     while s.peek() is not None:
         if s.at_kw('import'):
             doc.imports.extend(_p_import(s))
-        elif s.at_kw('tree'):
+        elif s.at_kw('tree') or s.at_kw('inline'):
             doc.trees.append(_p_tree(s))
         else:
             raise ParseError(f"Expected 'tree' or 'import', got {s.peek()}",
@@ -964,7 +982,8 @@ def _emit_zone(zone: core.ZoneDef, indent: str) -> list[str]:
 
 
 def _emit_tree(tree_def: core.TreeDef, indent: str) -> list[str]:
-    lines = [f'{indent}tree {_f(tree_def.name)} {_ft(tree_def.bl_idname)} {{']
+    kw = 'inline tree' if tree_def.inline else 'tree'
+    lines = [f'{indent}{kw} {_f(tree_def.name)} {_ft(tree_def.bl_idname)} {{']
     ti = indent + "  "
 
     iface = _emit_interface(tree_def.interface, ti)

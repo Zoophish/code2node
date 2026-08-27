@@ -1,14 +1,5 @@
-# Copyright (C) 2026, Sam Warren, All rights reserved.
-"""
-Node type universe extraction.
-
-Introspects bpy.types to build a complete registry of every node type
-available for a given tree type, including properties, enum values, and
-socket signatures. Handles dynamic nodes (where sockets change based on
-property values) by enumerating per-variant.
-
-Must run inside Blender (requires bpy).
-"""
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Sam Warren
 import inspect
 from dataclasses import dataclass, field
 from typing import Any
@@ -21,7 +12,7 @@ from .core import NodeIOError
 # ---------------------------------------------------------------------------
 
 class SchemaExtractionError(NodeIOError):
-    """Raised when schema extraction fails for a node type."""
+    pass
 
 
 # ---------------------------------------------------------------------------
@@ -30,7 +21,6 @@ class SchemaExtractionError(NodeIOError):
 
 @dataclass
 class SocketDef:
-    """A socket signature entry."""
     name: str
     bl_idname: str  # e.g. "NodeSocketFloat", "NodeSocketVector"
     default_value: Any = None
@@ -38,7 +28,6 @@ class SocketDef:
 
 @dataclass
 class PropertyDef:
-    """A node property definition."""
     identifier: str
     type: str  # ENUM, FLOAT, INT, BOOLEAN, STRING
     default: Any = None
@@ -50,7 +39,6 @@ class PropertyDef:
 
 @dataclass
 class NodeVariant:
-    """A specific configuration of a dynamic node (one set of property values)."""
     variant_key: dict[str, str]  # e.g. {"operation": "ADD"}
     inputs: list[SocketDef] = field(default_factory=list)
     outputs: list[SocketDef] = field(default_factory=list)
@@ -58,7 +46,6 @@ class NodeVariant:
 
 @dataclass
 class NodeTypeDef:
-    """Complete definition of a node type."""
     bl_idname: str
     bl_label: str
     description: str = ""
@@ -70,7 +57,6 @@ class NodeTypeDef:
 
 @dataclass
 class SchemaRegistry:
-    """The complete type universe for one or more tree types."""
     tree_types: dict[str, list[NodeTypeDef]] = field(default_factory=dict)
     socket_types: list[str] = field(default_factory=list)
 
@@ -80,8 +66,6 @@ class SchemaRegistry:
 # ---------------------------------------------------------------------------
 
 def _jsonable(val: Any) -> Any:
-    """Coerce a default value to something JSON-safe; drop anything exotic
-    (ID datablock references like VectorFont, Image, etc.)."""
     if val is None or isinstance(val, (bool, int, float, str)):
         return val
     if isinstance(val, (list, tuple)):
@@ -208,7 +192,6 @@ def _read_sockets(collection) -> list[SocketDef]:
 
 
 def _extract_properties(cls) -> list[PropertyDef]:
-    """Extract non-inherited properties from a node class."""
     base_props = set()
     if cls.bl_rna.base:
         base_props = {p.identifier for p in cls.bl_rna.base.properties}
@@ -248,9 +231,6 @@ def _socket_signature(node) -> tuple:
 
 
 def _probe_dynamic_properties(node, props: list[PropertyDef]) -> list[PropertyDef]:
-    """Enum properties that actually change the socket layout, found by
-    setting each value and watching the signature (a name heuristic misses
-    e.g. noise_dimensions on Noise Texture)."""
     dynamic = []
     for prop in props:
         if not prop.enum_values:
@@ -280,7 +260,6 @@ def _probe_dynamic_properties(node, props: list[PropertyDef]) -> list[PropertyDe
 # ---------------------------------------------------------------------------
 
 def _extract_node_type(bl_idname: str, scratch_tree) -> NodeTypeDef | None:
-    """Instantiate a node in the scratch tree and extract its full definition."""
     try:
         node = scratch_tree.nodes.new(type=bl_idname)
     except (RuntimeError, TypeError):
@@ -339,8 +318,6 @@ def _extract_node_type(bl_idname: str, scratch_tree) -> NodeTypeDef | None:
 # ---------------------------------------------------------------------------
 
 def _discover_tree_types():
-    """Discover all registered NodeTree subclasses and their associated
-    Node base classes from bpy.types."""
     import bpy
 
     tree_types = {}
@@ -357,10 +334,6 @@ def _discover_tree_types():
 
 
 def _all_node_classes():
-    """Every registered Node subclass. Which ones belong to a given tree type
-    is decided by instantiation: nodes.new raises for illegal combinations,
-    and that check is authoritative — base-class naming conventions miss
-    legal cross-tree types (FunctionNode*, ShaderNodeMath in geometry trees)."""
     import bpy
 
     return [
@@ -372,18 +345,6 @@ def _all_node_classes():
 
 
 def extract_schema(tree_type_ids: list[str] | None = None) -> SchemaRegistry:
-    """Extract the full node type schema for the given tree types.
-
-    Automatically discovers all registered NodeTree subclasses if no
-    specific types are requested. This includes custom tree types from
-    other addons.
-
-    Args:
-        tree_type_ids: List of tree bl_idnames, e.g. ["ShaderNodeTree"].
-                       Defaults to all discovered tree types.
-
-    Must be called from within Blender.
-    """
     import bpy
 
     all_tree_types = _discover_tree_types()

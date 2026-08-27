@@ -1,11 +1,11 @@
-# Copyright (C) 2026, Sam Warren, All rights reserved.
-"""Blender addon UI: operators and panel. Requires bpy."""
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Sam Warren
 import os
 import bpy
 from bpy.props import BoolProperty, StringProperty
 from bpy_extras.io_utils import ExportHelper, ImportHelper
 
-from . import core, expand, format, loader, schema, validate
+from . import core, expand, format, layout, loader, schema, validate
 from .core import NodeIOError
 
 
@@ -13,7 +13,7 @@ from .core import NodeIOError
 # Operators
 # ---------------------------------------------------------------------------
 
-class NODEIO_OT_Export(bpy.types.Operator, ExportHelper):
+class CODE2NODE_OT_Export(bpy.types.Operator, ExportHelper):
     """Export the active node tree to a text file"""
 
     bl_idname = "code2node.export"
@@ -56,7 +56,7 @@ class NODEIO_OT_Export(bpy.types.Operator, ExportHelper):
         return None
 
 
-class NODEIO_OT_Import(bpy.types.Operator, ImportHelper):
+class CODE2NODE_OT_Import(bpy.types.Operator, ImportHelper):
     """Import a node tree from a text file"""
 
     bl_idname = "code2node.import_tree"
@@ -129,7 +129,54 @@ class NODEIO_OT_Import(bpy.types.Operator, ImportHelper):
         return None
 
 
-class NODEIO_OT_GenerateSchema(bpy.types.Operator):
+class CODE2NODE_OT_AutoLayout(bpy.types.Operator):
+    """Arrange the active node tree: dataflow left to right, frames and
+    zones as blocks"""
+
+    bl_idname = "code2node.auto_layout"
+    bl_label = "Auto Layout"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        node_tree = getattr(context.space_data, 'edit_tree', None)
+        if node_tree is None:
+            self.report({'ERROR'}, "No active node tree found")
+            return {'CANCELLED'}
+
+        try:
+            tree_def = core.tree_to_ir(node_tree)
+        except NodeIOError as e:
+            self.report({'ERROR'}, f"Layout failed: {e}")
+            return {'CANCELLED'}
+
+        # Drawn dimensions include the UI scale; node locations don't.
+        ui_scale = context.preferences.system.ui_scale
+        sizes = {n.name: (n.dimensions.x / ui_scale, n.dimensions.y / ui_scale)
+                 for n in node_tree.nodes
+                 if n.bl_idname != 'NodeFrame' and n.dimensions.x > 0}
+        layout.layout_tree(tree_def, sizes=sizes)
+
+        def move(node_def):
+            node = node_tree.nodes.get(node_def.name)
+            if node is not None:
+                node.hide = node_def.hide
+                node.location = node_def.location
+
+        for node_def in tree_def.nodes:
+            move(node_def)
+        for zone_def in tree_def.zones:
+            for node_def in zone_def.nodes:
+                move(node_def)
+            input_node = node_tree.nodes.get(zone_def.name)
+            if input_node is not None:
+                input_node.location = zone_def.location
+                paired = getattr(input_node, 'paired_output', None)
+                if paired is not None and zone_def.output_location is not None:
+                    paired.location = zone_def.output_location
+        return {'FINISHED'}
+
+
+class CODE2NODE_OT_GenerateSchema(bpy.types.Operator):
     """Generate node type schema for all tree types (shader, geometry, compositor)"""
 
     bl_idname = "code2node.generate_schema"
@@ -184,19 +231,20 @@ class NODEIO_OT_GenerateSchema(bpy.types.Operator):
 # Panel
 # ---------------------------------------------------------------------------
 
-class NODEIO_PT_Panel(bpy.types.Panel):
-    """Node IO panel in the node editor sidebar"""
+class CODE2NODE_PT_Panel(bpy.types.Panel):
+    """code2node panel in the node editor sidebar"""
 
-    bl_label = "Node IO"
-    bl_idname = "NODEIO_PT_panel"
+    bl_label = "code2node"
+    bl_idname = "CODE2NODE_PT_panel"
     bl_space_type = 'NODE_EDITOR'
     bl_region_type = 'UI'
-    bl_category = "Node IO"
+    bl_category = "code2node"
 
     def draw(self, context):
         layout = self.layout
         layout.operator("code2node.export", icon='EXPORT')
         layout.operator("code2node.import_tree", icon='IMPORT')
+        layout.operator("code2node.auto_layout", icon='NODETREE')
         layout.separator()
         layout.operator("code2node.generate_schema", icon='FILE_TEXT')
 
@@ -206,10 +254,11 @@ class NODEIO_PT_Panel(bpy.types.Panel):
 # ---------------------------------------------------------------------------
 
 classes = (
-    NODEIO_OT_Export,
-    NODEIO_OT_Import,
-    NODEIO_OT_GenerateSchema,
-    NODEIO_PT_Panel,
+    CODE2NODE_OT_Export,
+    CODE2NODE_OT_Import,
+    CODE2NODE_OT_AutoLayout,
+    CODE2NODE_OT_GenerateSchema,
+    CODE2NODE_PT_Panel,
 )
 
 

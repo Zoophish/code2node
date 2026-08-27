@@ -1,11 +1,5 @@
-# Copyright (C) 2026, Sam Warren, All rights reserved.
-"""
-DSL text format for node tree serialisation.
-
-Two-stage parser: tokenise -> parse. The tokeniser produces typed tokens,
-the parser consumes them according to grammar rules. Whitespace-agnostic,
-comma-delimited.
-"""
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Sam Warren
 import collections
 import re
 from typing import Any
@@ -157,9 +151,6 @@ def _p_type(s: Stream) -> str:
 
 
 def _p_socket_ref(s: Stream) -> SocketRef:
-    """Parse (index: "name"), (index), or ("name") — the last is a name-only
-    ref (index -1) resolved against the schema by validate.resolve_names.
-    Returns SocketRef with node="" (filled in by caller)."""
     s.expect('LPAREN')
     if s.at('STRING'):
         name = s.next().value
@@ -175,7 +166,6 @@ def _p_socket_ref(s: Stream) -> SocketRef:
 
 
 def _p_node_socket_ref(s: Stream) -> SocketRef:
-    """Parse "NodeName"(index: "name") or "NodeName"(index)."""
     node = _p_name(s)
     ref = _p_socket_ref(s)
     ref.node = node
@@ -316,8 +306,6 @@ def _p_node(s: Stream) -> tuple[core.NodeDef, list[core.LinkDef]]:
     links = []
 
     def declare_item(side: str, item_name: str, socket_type: str) -> int:
-        """A typed entry on an item-bearing node declares an item; its index
-        is offset + position, canonical without a schema lookup."""
         offsets = core.ITEM_NODES.get(node_type)
         if offsets is None:
             raise ParseError(
@@ -424,13 +412,6 @@ def _p_reroute(s: Stream) -> tuple[core.NodeDef, core.LinkDef | None]:
 
 
 def _p_expr(s: Stream) -> tuple[list[core.NodeDef], list[core.LinkDef]]:
-    """Parse and compile an expression block.
-
-    Grammar: `expr` `<`type`>` name transform? `{` (`expression` `=` STRING |
-    `inputs` entries)* `}`. The type is the domain the formula computes in
-    and is required. The formula compiles here — errors carry the file
-    position of the expression entry plus the column inside the formula.
-    """
     from . import expr as expr_mod
 
     kw = s.expect('KW', 'expr')
@@ -497,10 +478,6 @@ def _p_interface(s: Stream) -> list[core.InterfaceSocketDef]:
 
 
 def _p_body_construct(s: Stream, nodes: list, links: list) -> bool:
-    """The node-bearing constructs every body accepts — `node`, `frame`,
-    `reroute`, `expr`. One production, shared by tree and zone bodies, so a
-    construct added here appears in both. Returns False when the stream is
-    not at one."""
     if s.at_kw('node'):
         node_def, node_links = _p_node(s)
         nodes.append(node_def)
@@ -569,10 +546,6 @@ def _p_repeat(s: Stream) -> core.RepeatZoneDef:
 
 
 def _p_closure(s: Stream) -> core.ClosureZoneDef:
-    """A closure zone: `inputs` declares the closure's parameters (read by
-    inner nodes from the pseudo-node `"closure"`), `outputs` declares its
-    results and maps them from inner node outputs. External nodes read the
-    closure value via the zone name: `"Name"(0)`."""
     s.expect('KW', 'closure')
     name = _p_name(s)
     location, _, _ = _p_transform(s)
@@ -644,17 +617,6 @@ def _p_module_path(s: Stream) -> str:
 
 
 def _p_import(s: Stream) -> list[core.ImportDef]:
-    """Parse an import statement.
-
-    Grammar: `import` module (`,` module)* [ `{` (`tree` STRING `,`?)* `}` ]
-    where module is DOT* WORD (DOT WORD)*.
-
-    A module path's segments map to path components; leading dots climb
-    directories (zero or one dot denotes the importing file's directory).
-    The optional brace block selects trees by name from a single module;
-    entries are typed and `tree` is the only importable kind. No block
-    selects every tree.
-    """
     s.expect('KW', 'import')
     modules = [_p_module_path(s)]
     while s.at('COMMA'):
@@ -697,8 +659,6 @@ def parse_document(text: str) -> core.DocumentDef:
 
 
 def deserialise(text: str) -> list[core.TreeDef]:
-    """The document's own trees. Import statements parse but stay unresolved —
-    loader.load(path) resolves them across files."""
     return parse_document(text).trees
 
 
@@ -780,8 +740,6 @@ def _emit_node(node: core.NodeDef, links: list[core.LinkDef], indent: str) -> li
     if node.hide:
         lines.append(f"{inner}hide = true")
 
-    # Declared items emit as typed entries at their canonical indices;
-    # reparsing the declaration recreates the item.
     offsets = core.ITEM_NODES.get(node.bl_idname)
     item_in: dict[int, core.NodeItemDef] = {}
     item_out: dict[int, core.NodeItemDef] = {}
@@ -791,12 +749,10 @@ def _emit_node(node: core.NodeDef, links: list[core.LinkDef], indent: str) -> li
         for pos, item in enumerate(node.output_items):
             item_out[offsets[1] + pos] = item
 
-    # Collect inputs: links targeting this node + default values
     node_links = [l for l in links if l.target.node == node.name]
     linked_indices = {l.target.index for l in node_links}
 
     input_lines = []
-    # Merge links, values, and item declarations by index order
     all_indices = sorted(linked_indices | set(node.input_values.keys())
                          | set(item_in))
     for idx in all_indices:
@@ -811,8 +767,6 @@ def _emit_node(node: core.NodeDef, links: list[core.LinkDef], indent: str) -> li
             else:
                 input_lines.append(f"{inner}  {base},")
         elif matching:
-            # Multi-input sockets (e.g. Join Geometry) carry several links on
-            # one index — emit them all.
             for link in matching:
                 input_lines.append(
                     f"{inner}  {_fsr(idx, link.target.name)} -> {_fs(link.source)},"

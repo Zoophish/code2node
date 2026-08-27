@@ -3,10 +3,15 @@
   "displayName": "Blender Nodes DSL",
   "description": "Syntax highlighting for .nodes and .nodetypes files",
   "version": "0.1.0",
+  "publisher": "code2node",
+  "license": "GPL-3.0-or-later",
   "engines": {
     "vscode": "^1.60.0"
   },
   "categories": ["Programming Languages"],
+  "scripts": {
+    "package": "npx --yes @vscode/vsce package --no-dependencies --allow-missing-repository"
+  },
   "contributes": {
     "languages": [
       {

@@ -1,15 +1,5 @@
-# Copyright (C) 2026, Sam Warren, All rights reserved.
-"""
-Offline analysis of parsed node trees against a schema registry: name-based
-socket resolution and validation. Runs without Blender.
-
-Resolution turns name-only socket refs into indices, the canonical form;
-names resolve on group interface sockets, built-in node sockets are addressed
-by index. Validation catches unknown node types, bad
-properties/enums, out-of-range socket indices, and dangling references before
-bpy ever sees the tree. The registry comes from schema.load_registry
-(registry.json, generated inside Blender by `cli.py schema`).
-"""
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Sam Warren
 from dataclasses import dataclass, field
 
 from .core import (ClosureZoneDef, ITEM_NODES, LinkDef, NodeDef,
@@ -40,9 +30,8 @@ class Issue:
 # ---------------------------------------------------------------------------
 
 def _global_types(registry: SchemaRegistry) -> dict[str, NodeTypeDef]:
-    """bl_idname -> NodeTypeDef across every tree type. Blender allows some
-    cross-tree node reuse (e.g. ShaderNodeMath inside geometry trees), so
-    lookups fall back to this before calling a type unknown."""
+    """Node types keyed by bl_idname. A node type may be valid in several
+    tree types."""
     out: dict[str, NodeTypeDef] = {}
     for defs in registry.tree_types.values():
         for n in defs:
@@ -51,26 +40,17 @@ def _global_types(registry: SchemaRegistry) -> dict[str, NodeTypeDef]:
 
 
 def _effective_props(node_def: NodeDef, type_def: NodeTypeDef) -> dict:
-    """The node's property values with schema defaults filled in."""
     props = {p.identifier: p.default for p in type_def.properties}
     props.update(node_def.properties)
     return props
 
 
 def _interface_names(tree: TreeDef, direction: str) -> list[str]:
-    """Socket names of a tree interface side, in index order."""
     return [s.name for s in tree.interface if s.direction == direction]
 
 
 @dataclass
 class _Scope:
-    """One name-visibility region: a tree's top level, or one zone body.
-    Socket refs anywhere in the region resolve against the same names —
-    the pseudo-node (zone scopes only), sibling zone names (their external
-    read sockets), and visible node defs. `own_nodes` are the nodes the
-    region declares; `nodes` adds what a zone body sees of the enclosing
-    tree. Resolution, validation, and the Blender-side builder all treat a
-    region this way; anything a scope lookup rejects cannot build."""
     tree: TreeDef
     zone: ZoneDef | None
     nodes: dict[str, NodeDef]
@@ -117,11 +97,6 @@ def _collect_trees(tree_defs: list[TreeDef]) -> dict[str, TreeDef]:
 
 def _active_variant(node_def: NodeDef,
                     type_def: NodeTypeDef) -> tuple[NodeVariant | None, bool]:
-    """Returns (variant, names_reliable). Schema variants are deduplicated
-    by socket signature, so a property value with no exact variant match is
-    normal (e.g. Math operation=SINE shares the ADD signature). When all
-    variants agree on socket counts we can still range-check indices, but
-    socket names may belong to a different variant."""
     if not type_def.variants:
         return None, False
     props = _effective_props(node_def, type_def)
@@ -141,31 +116,19 @@ def _active_variant(node_def: NodeDef,
 # ---------------------------------------------------------------------------
 
 class _NameResolver:
-    """Resolves name-only socket refs (index == -1) to indices, mutating the
-    trees in place. Names resolve on group interface sockets, where they are
-    author-chosen and stable while a library tool's parameter list evolves:
-    group instances via the referenced tree's interface, NodeGroupInput/Output
-    via the containing tree's interface, zone pseudo-nodes ("repeat",
-    "closure") via the zone's items, item-bearing nodes via their declared
-    items. Built-in node sockets are addressed by index (the schema pins them
-    per Blender version, and their names collide freely)."""
-
     def __init__(self, all_trees: dict[str, TreeDef]):
         self.all_trees = all_trees
 
     def _candidate_indices(self, node_def: NodeDef, tree: TreeDef,
                            name: str, side: str) -> tuple[list[int] | None, str]:
-        """All indices `name` could mean on this node's `side` ("in"/"out").
-        Returns (indices, error_message); indices is None when the node's
-        sockets are unknowable offline."""
         idname = node_def.bl_idname
 
         if idname == "NodeReroute":
             return [0], ""
 
         if idname in ITEM_NODES:
-            in_off, out_off = ITEM_NODES[idname]
-            offset = in_off if side == "in" else out_off
+            spec = ITEM_NODES[idname]
+            offset = spec.input_offset if side == "in" else spec.output_offset
             items = node_def.input_items if side == "in" else node_def.output_items
             return [offset + i for i, it in enumerate(items) if it.name == name], ""
 
@@ -226,8 +189,6 @@ class _NameResolver:
 
     def _resolve_source(self, ref: tuple[str, int, str], scope: _Scope,
                         issues: list[Issue]) -> tuple[str, int, str]:
-        """Resolve a (node, index, name) source triple — a repeat zone
-        header ref or an output mapping."""
         node_name, index, sock_name = ref
         if index >= 0:
             return ref
@@ -267,8 +228,6 @@ class _NameResolver:
 
 
 def resolve_names(tree_defs: list[TreeDef], registry: SchemaRegistry) -> list[Issue]:
-    """Resolve all name-only socket refs to indices, in place. Returns issues
-    for anything unresolvable; trees with no name refs are untouched."""
     all_trees = _collect_trees(tree_defs)
     resolver = _NameResolver(all_trees)
     issues: list[Issue] = []
@@ -301,15 +260,14 @@ class _TreeValidator:
         self.issues.append(Issue("warning", self.tree.name, node, msg))
 
     def _socket_counts(self, node_def: NodeDef) -> tuple[int | None, int | None]:
-        """(n_inputs, n_outputs) for a node, or None where unknown."""
         if node_def.bl_idname == "NodeReroute":
             return 1, 1
         if node_def.bl_idname == "NodeFrame":
             return 0, 0
         if node_def.bl_idname in ITEM_NODES:
-            in_off, out_off = ITEM_NODES[node_def.bl_idname]
-            return (in_off + len(node_def.input_items),
-                    out_off + len(node_def.output_items))
+            spec = ITEM_NODES[node_def.bl_idname]
+            return (spec.input_offset + len(node_def.input_items),
+                    spec.output_offset + len(node_def.output_items))
         if node_def.bl_idname in GROUP_TYPES:
             ref = self.all_trees.get(node_def.node_tree_name or "")
             if ref is None:
@@ -395,9 +353,6 @@ class _TreeValidator:
                                      "likely wrong index")
 
     def _output_count(self, node_name: str, scope: _Scope) -> int | None:
-        """Readable output sockets of a name in scope: the pseudo-node's
-        items, a sibling zone's external reads, or a node's outputs. None
-        when unknowable offline; -1 when the name is not in scope."""
         if node_name == scope.pseudo:
             return len(scope.pseudo_items)
         if node_name in scope.zone_reads and node_name not in scope.nodes:
@@ -409,9 +364,6 @@ class _TreeValidator:
         return n_out
 
     def _float_expr_terminals(self, scope: _Scope) -> set[str]:
-        """Names of float-expression result nodes in scope, identified by
-        their `<name>.expr` frame. Their output is float32; feeding one into
-        an integer socket loses exactness silently at runtime."""
         out = set()
         for node_def in scope.nodes.values():
             if node_def.bl_idname != "NodeFrame" \
@@ -424,8 +376,6 @@ class _TreeValidator:
         return out
 
     def _input_socket_idname(self, node_def: NodeDef, idx: int) -> str | None:
-        """The bl_idname of a node's input socket, or None when unknowable
-        offline."""
         if node_def.bl_idname in GROUP_TYPES:
             ref = self.all_trees.get(node_def.node_tree_name or "")
             sockets = [s for s in ref.interface
@@ -436,7 +386,7 @@ class _TreeValidator:
                        if s.direction == "OUTPUT"]
             return sockets[idx].socket_type if idx < len(sockets) else None
         if node_def.bl_idname in ITEM_NODES:
-            offset = ITEM_NODES[node_def.bl_idname][0]
+            offset = ITEM_NODES[node_def.bl_idname].input_offset
             items = node_def.input_items
             if 0 <= idx - offset < len(items):
                 return items[idx - offset].socket_type
@@ -534,10 +484,6 @@ class _TreeValidator:
         self.check_closure_signatures(scopes)
 
     def check_closure_signatures(self, scopes: list[_Scope]):
-        """Blender matches evaluate items to the closure's items by name at
-        evaluation time; a mismatch silently yields the socket default. When
-        the closure input is wired from a zone in this document, the check
-        runs statically."""
         closures = {z.name: z for z in self.tree.zones
                     if isinstance(z, ClosureZoneDef)}
         if not closures:
@@ -580,9 +526,6 @@ class _TreeValidator:
 
 
 def validate(tree_defs: list[TreeDef], registry: SchemaRegistry) -> list[Issue]:
-    """Resolve name-based refs, then validate parsed trees against the
-    registry. Returns all issues found; an empty list means the document
-    should apply cleanly in Blender."""
     issues = resolve_names(tree_defs, registry)
     all_trees = _collect_trees(tree_defs)
     for td in all_trees.values():

@@ -1,14 +1,5 @@
-# Copyright (C) 2026, Sam Warren, All rights reserved.
-"""
-Preprocessor: `#directive` lines resolve by dumb text substitution before
-the tokeniser sees the document.
-
-Substitution is word-boundary and reaches inside strings, so defines work
-in formulas. Lines read top to down — a define may use earlier defines.
-File-local: imported files preprocess independently. A directive line
-becomes a blank line, so line numbers hold; an unknown directive is an
-error. `DIRECTIVES` is the extension point, one handler per keyword.
-"""
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Sam Warren
 import re
 
 from .core import NodeIOError
@@ -21,8 +12,6 @@ class PreprocessError(NodeIOError):
 
 
 class _State:
-    """One file's pass: the accumulated defines and their match pattern."""
-
     def __init__(self):
         self.defines: dict[str, str] = {}
         self.pattern = None

@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Sam Warren
 """
-CLI interface for code2node, invoked via Blender's Python interpreter.
-
 Usage:
     blender --background --python code2node/cli.py -- <command> [args]
 
 Commands:
     schema <output_dir>
-        Generate the full node type schema for all tree types.
+        Generate the full node type schema for all tree types available in
+        the Blender instance.
 
     query <registry.json> (-s <pattern> | <BlIdname> ...)
         Search node types by substring, or print a type's properties and
-        socket signatures in DSL ref syntax.
+        socket signatures in ref syntax.
 
     validate <file.nodes>
         Parse a .nodes file and report any errors.
@@ -20,11 +21,6 @@ Commands:
         Parse a .nodes file, serialise it back, and write the result.
         Useful for checking that a hand-edited or agent-generated file
         is well-formed.
-
-Examples:
-    blender --background --python code2node/cli.py -- schema ./schema
-    blender --background --python code2node/cli.py -- validate my_material.nodes
-    blender --background --python code2node/cli.py -- roundtrip my_material.nodes cleaned.nodes
 """
 import sys
 import os
@@ -35,7 +31,6 @@ if __package__ in {None, ""}:
 
 
 def _get_args():
-    """Extract arguments after the '--' separator."""
     try:
         idx = sys.argv.index("--")
         return sys.argv[idx + 1:]
@@ -45,7 +40,6 @@ def _get_args():
 
 def cmd_schema(output_dir):
     import json
-
     from . import schema, format
 
     schema_dir = os.path.join(output_dir, "node_schema")
@@ -86,8 +80,6 @@ def cmd_schema(output_dir):
 
 
 def cmd_query(registry_path, args):
-    """Query the schema registry. Runs under plain python3.
-    Socket lines print in DSL ref syntax, ready to paste into a .nodes file."""
     import json
 
     with open(registry_path, encoding='utf-8') as f:
@@ -128,9 +120,7 @@ def cmd_query(registry_path, args):
 
 
 def cmd_validate(filepath, schema_path=None):
-    from . import format
-
-    from . import loader
+    from . import format, loader
 
     try:
         tree_defs = loader.load(filepath)

@@ -1,9 +1,5 @@
-# Copyright (C) 2026, Sam Warren, All rights reserved.
-"""
-Inline tree expansion: each instance of an `inline tree` becomes a copy of
-its body, framed under the instance's name. Runs on resolved IR, before
-building.
-"""
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Sam Warren
 import copy
 
 from .core import (LinkDef, NodeDef, NodeIOError, RepeatZoneDef, TreeDef)
@@ -17,8 +13,6 @@ class ExpandError(NodeIOError):
 
 
 def expand_inlines(trees: list[TreeDef]) -> list[TreeDef]:
-    """Expand every instance of an inline tree, in every tree. Returns the
-    trees that exist at runtime, in the original order."""
     by_name = {t.name: t for t in trees}
     done: set[str] = set()
 
@@ -88,7 +82,6 @@ def _splice(tree: TreeDef, scope_nodes, scope_links, zone, inst: NodeDef,
     for name in _PSEUDO:
         mapping.pop(name, None)
 
-    # External links touching the instance, wherever in the tree they sit.
     in_links: dict[int, list] = {}
     out_links: dict[int, list] = {}
     for nodes_, links_, _ in _scopes(tree):
@@ -118,7 +111,6 @@ def _splice(tree: TreeDef, scope_nodes, scope_links, zone, inst: NodeDef,
         node.children = [mapping.get(c, c) for c in node.children]
         copied_nodes.append(node)
 
-    # Sources feeding the body's Group Output, by output index.
     out_sources: dict[int, LinkDef] = {}
     pending_values: list[tuple] = []  # (target ref, value) inside the body
 

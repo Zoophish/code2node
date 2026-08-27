@@ -1,13 +1,8 @@
-# Copyright (C) 2026, Sam Warren, All rights reserved.
-"""
-Core intermediate representation for Blender node trees.
-
-Socket references use indexes throughout. Names are optional annotations
-for readability and validation, but the index is the structural identifier.
-"""
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Sam Warren
 import collections
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, NamedTuple
 
 
 # ---------------------------------------------------------------------------
@@ -30,7 +25,6 @@ class DeserialisationError(NodeIOError):
 
 @dataclass
 class SocketRef:
-    """A reference to a specific socket on a node."""
     node: str
     index: int
     name: str = ""
@@ -48,19 +42,21 @@ class LinkDef:
 
 @dataclass
 class NodeItemDef:
-    """A declared item on an item-bearing node or zone: a socket the document
-    itself brings into existence, named and typed by the author."""
     name: str
     socket_type: str  # full idname, e.g. NodeSocketFloat
 
 
-# Item-bearing node types: sockets come from per-instance item lists rather
-# than the type signature. Maps bl_idname -> (input offset, output offset),
-# the socket index where item n starts (fixed sockets precede items, the
-# virtual extend socket trails them). Item n sits at offset + n, so declared
-# items carry canonical indices without a schema lookup.
+class ItemNodeSpec(NamedTuple):
+    input_offset: int
+    output_offset: int
+    collection: str = 'input_items'
+    output_collection: str | None = 'output_items'
+
+
 ITEM_NODES = {
-    'NodeEvaluateClosure': (1, 0),  # input 0 is the Closure socket
+    'NodeEvaluateClosure': ItemNodeSpec(1, 0),  # input 0 is the Closure socket
+    'GeometryNodeBake': ItemNodeSpec(0, 0, 'bake_items', None),
+    'GeometryNodeCaptureAttribute': ItemNodeSpec(1, 1, 'capture_items', None),
 }
 
 
@@ -107,12 +103,9 @@ class RepeatItemDef:
 
 @dataclass
 class ZoneDef:
-    """A paired-node zone: a named block of inner nodes and links. Inner
-    nodes read the zone's inputs from a pseudo-node (one per zone kind);
-    `output_mappings` wires inner outputs back to the zone's output node.
-    External nodes read the zone's outputs via the zone name."""
     name: str
     location: tuple[float, float] = (0.0, 0.0)
+    output_location: tuple[float, float] | None = None
     nodes: list[NodeDef] = field(default_factory=list)
     links: list[LinkDef] = field(default_factory=list)
     output_mappings: dict[str, tuple[str, int, str]] = field(default_factory=dict)
@@ -120,23 +113,18 @@ class ZoneDef:
 
 @dataclass
 class RepeatZoneDef(ZoneDef):
-    """Carried items loop between iterations; pseudo-node `"repeat"`."""
     items: list[RepeatItemDef] = field(default_factory=list)
     iterations: int | tuple[str, int, str] = 1  # literal int or (node, index, name) connection
 
 
 @dataclass
 class ClosureZoneDef(ZoneDef):
-    """A closure value: separate input and output item lists, as a tree
-    interface. Pseudo-node `"closure"`; the zone name resolves externally to
-    the single Closure output socket."""
     inputs: list[NodeItemDef] = field(default_factory=list)
     outputs: list[NodeItemDef] = field(default_factory=list)
 
 
 @dataclass
 class ImportDef:
-    """An import statement: a dotted module path plus selected tree names."""
     module: str  # leading dots climb directories from the importing file
     names: list[str] = field(default_factory=list)  # empty = every tree
 
@@ -155,7 +143,6 @@ class TreeDef:
 
 @dataclass
 class DocumentDef:
-    """One parsed .nodes file: import statements plus its own trees."""
     imports: list[ImportDef] = field(default_factory=list)
     trees: list[TreeDef] = field(default_factory=list)
 
@@ -187,6 +174,7 @@ class _Extractor:
     def __init__(self, scratch_tree, verbose: bool = False):
         self._scratch = scratch_tree
         self._cache: dict = {}
+        self._factory_props: dict = {}
         self._verbose = verbose
 
     def extract_node(self, node, linked_indices: set[tuple[str, int]]) -> NodeDef:
@@ -235,40 +223,69 @@ class _Extractor:
         if hasattr(node, "node_tree") and node.node_tree is not None:
             node_def.node_tree_name = node.node_tree.name
 
-        if node.bl_idname in ITEM_NODES:
-            in_off, out_off = ITEM_NODES[node.bl_idname]
+        spec = ITEM_NODES.get(node.bl_idname)
+        if spec is not None:
+            input_items = getattr(node, spec.collection)
+            output_items = (input_items if spec.output_collection is None
+                            else getattr(node, spec.output_collection))
             # Socket bl_idname read from the live socket at the item's index —
             # items store short enum identifiers, the DSL uses full idnames.
-            for i, item in enumerate(node.input_items):
+            for i, item in enumerate(input_items):
                 node_def.input_items.append(NodeItemDef(
-                    item.name, node.inputs[in_off + i].bl_idname))
-            for i, item in enumerate(node.output_items):
+                    item.name, node.inputs[spec.input_offset + i].bl_idname))
+            for i, item in enumerate(output_items):
                 node_def.output_items.append(NodeItemDef(
-                    item.name, node.outputs[out_off + i].bl_idname))
+                    item.name, node.outputs[spec.output_offset + i].bl_idname))
 
         return node_def
 
-    def _extract_properties(self, node) -> dict[str, Any]:
+    def _read_properties(self, node) -> dict[str, Any]:
         if not hasattr(type(node), 'bl_rna') or type(node).bl_rna.base is None:
             return {}
         props = {}
         base_props = {p.identifier for p in type(node).bl_rna.base.properties}
         for prop in node.bl_rna.properties:
-            if prop.identifier in base_props or prop.is_readonly:
+            if (prop.identifier in base_props or prop.is_readonly
+                    or prop.type not in ('ENUM', 'FLOAT', 'INT', 'BOOLEAN', 'STRING')):
                 continue
             try:
                 val = getattr(node, prop.identifier)
             except AttributeError:
                 continue
-            if hasattr(prop, 'default') and val == prop.default:
-                continue
-            if prop.type == 'ENUM':
-                props[prop.identifier] = val
+            if getattr(prop, 'is_array', False):
+                val = tuple(round(v, 6) if isinstance(v, float) else v for v in val)
             elif prop.type == 'FLOAT':
-                props[prop.identifier] = round(val, 6) if isinstance(val, float) else val
-            elif prop.type in ('INT', 'BOOLEAN', 'STRING'):
-                props[prop.identifier] = val
+                val = round(val, 6)
+            props[prop.identifier] = val
         return props
+
+    def _factory_properties(self, bl_idname: str) -> dict[str, Any] | None:
+        if bl_idname not in self._factory_props:
+            try:
+                ref = self._scratch.nodes.new(type=bl_idname)
+            except RuntimeError:
+                self._factory_props[bl_idname] = None
+            else:
+                self._factory_props[bl_idname] = self._read_properties(ref)
+                self._scratch.nodes.remove(ref)
+        return self._factory_props[bl_idname]
+
+    def _extract_properties(self, node) -> dict[str, Any]:
+        values = self._read_properties(node)
+        factory = self._factory_properties(node.bl_idname)
+        if factory is not None:
+            return {k: v for k, v in values.items() if factory.get(k) != v}
+        rna = {p.identifier: p for p in node.bl_rna.properties}
+
+        def declared(identifier):
+            prop = rna[identifier]
+            if getattr(prop, 'is_array', False):
+                return tuple(round(v, 6) if isinstance(v, float) else v
+                             for v in prop.default_array)
+            default = getattr(prop, 'default', None)
+            return round(default, 6) if isinstance(default, float) else default
+
+        return {k: v for k, v in values.items() if declared(k) != v}
 
     def _get_defaults(self, bl_idname: str, properties: dict) -> _Defaults:
         cache_key = (bl_idname, tuple(sorted(properties.items())))
@@ -307,7 +324,6 @@ class _Extractor:
 
 
 def _get_linked_indices(node_tree) -> set[tuple[str, int]]:
-    """Return set of (node_name, input_index) for all linked input sockets."""
     linked = set()
     for link in node_tree.links:
         if link.is_valid:
@@ -392,11 +408,6 @@ def _find_inner_nodes(input_name: str, output_name: str, links: list[LinkDef]) -
 def _classify_zone_links(links: list[LinkDef], input_name: str, output_name: str,
                          zone_names: set[str], zone_name: str, pseudo: str,
                          src_offset: int):
-    """Split a tree's links around one zone. Returns (inner_links,
-    remaining_links, output_mappings). Inner reads from the zone's input node
-    become pseudo-node refs with item-relative indices (src_offset skips
-    fixed sockets before the items); writes into the output node become
-    output mappings; links leaving the zone read from the zone name."""
     inner_links: list[LinkDef] = []
     remaining_links: list[LinkDef] = []
     output_mappings: dict[str, tuple[str, int, str]] = {}
@@ -455,7 +466,6 @@ def _extract_repeat_zones(bpy_tree, tree_def: TreeDef):
             default = _socket_value(socket) if socket is not None else None
             items.append(RepeatItemDef(name=item.name, socket_type=socket_type, default_value=default))
 
-        # Iterations — literal or connected
         iterations = 1
         iter_socket = bpy_input.inputs.get("Iterations")
         if iter_socket is not None:
@@ -463,15 +473,12 @@ def _extract_repeat_zones(bpy_tree, tree_def: TreeDef):
             if iter_val is not None:
                 iterations = iter_val
 
-        # Find inner nodes
         inner_names = _find_inner_nodes(input_name, output_name, tree_def.links)
         zone_names = inner_names | {input_name, output_name}
 
         zone_name = input_name.replace("Repeat Input", "Repeat").strip() or "Repeat"
         item_names = {item.name for item in items}
 
-        # Header links read from outside the zone: the iteration count and
-        # each item's initial value target the input node directly.
         body_links = []
         for link in tree_def.links:
             src, tgt = link.source, link.target
@@ -486,7 +493,6 @@ def _extract_repeat_zones(bpy_tree, tree_def: TreeDef):
                 continue
             body_links.append(link)
 
-        # Repeat input outputs: [Iteration, item0, item1, ...] — offset 1.
         inner_links, remaining_links, output_mappings = _classify_zone_links(
             body_links, input_name, output_name, zone_names, zone_name,
             "repeat", 1)
@@ -522,9 +528,6 @@ def _extract_closure_zones(bpy_tree, tree_def: TreeDef):
         bpy_input = bpy_tree.nodes[input_name]
         bpy_output = bpy_tree.nodes[output_name]
 
-        # Items live on the output node; input items surface as the input
-        # node's outputs, output items as the output node's inputs. Socket
-        # bl_idnames come from the live sockets (items store short enums).
         zone_inputs = [NodeItemDef(item.name, bpy_input.outputs[i].bl_idname)
                        for i, item in enumerate(bpy_output.input_items)]
         zone_outputs = [NodeItemDef(item.name, bpy_output.inputs[i].bl_idname)
@@ -534,7 +537,6 @@ def _extract_closure_zones(bpy_tree, tree_def: TreeDef):
         zone_names = inner_names | {input_name, output_name}
         zone_name = input_name.replace("Closure Input", "Closure").strip() or "Closure"
 
-        # Closure input outputs: [item0, item1, ...] — no fixed sockets.
         inner_links, remaining_links, output_mappings = _classify_zone_links(
             tree_def.links, input_name, output_name, zone_names, zone_name,
             "closure", 0)
@@ -710,17 +712,24 @@ def _build_node(node_def: NodeDef, node_tree, existing_trees: dict) -> tuple:
         node.node_tree = ref
 
     if node_def.input_items or node_def.output_items:
-        if not hasattr(node, 'input_items'):
+        spec = ITEM_NODES.get(node_def.bl_idname)
+        if spec is None or not hasattr(node, spec.collection):
             raise DeserialisationError(
                 f"Node '{node_def.name}' ({node_def.bl_idname}) declares "
                 "items but the node type has no item lists"
             )
-        for item_def in node_def.input_items:
-            node.input_items.new(
-                _short_socket_type(item_def.socket_type), item_def.name)
-        for item_def in node_def.output_items:
-            node.output_items.new(
-                _short_socket_type(item_def.socket_type), item_def.name)
+        if spec.output_collection is None:
+            # One list mirrored onto both sides; either block declares it.
+            for item_def in node_def.input_items or node_def.output_items:
+                getattr(node, spec.collection).new(
+                    _short_socket_type(item_def.socket_type), item_def.name)
+        else:
+            for item_def in node_def.input_items:
+                getattr(node, spec.collection).new(
+                    _short_socket_type(item_def.socket_type), item_def.name)
+            for item_def in node_def.output_items:
+                getattr(node, spec.output_collection).new(
+                    _short_socket_type(item_def.socket_type), item_def.name)
 
     if node_def.named_input_values:
         raise DeserialisationError(
@@ -757,10 +766,6 @@ def _create_links(link_defs: list[LinkDef], node_map: dict, node_tree) -> list[s
             )
         node_tree.links.new(src.outputs[link_def.source.index], tgt.inputs[link_def.target.index])
 
-    # A link into a socket a node property has disabled (e.g. Sample
-    # Curve's Curve Index under use_all_curves) either vanishes or stays in
-    # the tree dead (is_valid False, socket disabled) — silently inert
-    # either way. Verify every requested link exists and is live.
     present: dict = {}
     for link in node_tree.links:
         key = (link.from_node.name, link.from_socket.identifier,
@@ -799,10 +804,6 @@ def _set_frame_parents(tree_def: TreeDef, node_map: dict):
                     child.parent = frame
 
 
-# Item collections take short enum identifiers ('FLOAT'); the DSL uses full
-# socket idnames. Subtypes (NodeSocketFloatFactor, NodeSocketVectorXYZ, ...)
-# exist only on interfaces — item enums know the base types, so subtypes
-# collapse to theirs.
 _SHORT_TYPE_IRREGULAR = {'NodeSocketBool': 'BOOLEAN', 'NodeSocketColor': 'RGBA'}
 _ITEM_BASE_TYPES = ('Float', 'Int', 'Vector', 'Rotation', 'Matrix', 'String',
                     'Menu', 'Object', 'Image', 'Geometry', 'Collection',
@@ -824,9 +825,6 @@ def _short_socket_type(socket_idname: str) -> str:
 def _build_zone_body(zone_def: ZoneDef, pseudo: str, src_offset: int,
                      input_node, output_node, node_tree, node_map: dict,
                      existing_trees: dict) -> list[str]:
-    """Inner nodes, inner links, and output mappings — the part every zone
-    kind shares. `pseudo` refs read the input node's outputs at index +
-    src_offset (fixed sockets precede the items there)."""
     warnings: list[str] = []
 
     for node_def in zone_def.nodes:
@@ -883,7 +881,6 @@ def _build_zone_body(zone_def: ZoneDef, pseudo: str, src_offset: int,
 
 
 def _repeat_pair_types(tree_idname: str) -> tuple[str, str]:
-    """Repeat zone nodes are per-tree-type variants; closures are not."""
     prefix = 'ShaderNode' if tree_idname.startswith('ShaderNode') else 'GeometryNode'
     return prefix + 'RepeatInput', prefix + 'RepeatOutput'
 
@@ -894,13 +891,13 @@ def _build_repeat_zone(zone_def: RepeatZoneDef, node_tree, node_map: dict,
     input_node = node_tree.nodes.new(input_type)
     output_node = node_tree.nodes.new(output_type)
     input_node.pair_with_output(output_node)
-    # Extraction derives the zone name from the input node's name; naming it
-    # after the zone makes the name survive a bpy roundtrip.
+
+
     input_node.name = zone_def.name
     input_node.location = zone_def.location
+    if zone_def.output_location is not None:
+        output_node.location = zone_def.output_location
 
-    # The output node arrives with a default Geometry item; the document's
-    # item list is authoritative, and a leftover default shifts every index.
     output_node.repeat_items.clear()
     for item_def in zone_def.items:
         output_node.repeat_items.new(
@@ -940,7 +937,6 @@ def _build_repeat_zone(zone_def: RepeatZoneDef, node_tree, node_map: dict,
 
     node_map[zone_def.name] = output_node
 
-    # Repeat input outputs: [Iteration, item0, item1, ...] — offset 1.
     return _build_zone_body(zone_def, "repeat", 1, input_node, output_node,
                             node_tree, node_map, existing_trees)
 
@@ -950,13 +946,12 @@ def _build_closure_zone(zone_def: ClosureZoneDef, node_tree, node_map: dict,
     input_node = node_tree.nodes.new('NodeClosureInput')
     output_node = node_tree.nodes.new('NodeClosureOutput')
     input_node.pair_with_output(output_node)
-    # Extraction derives the zone name from the input node's name; naming it
-    # after the zone makes the name survive a bpy roundtrip.
+
     input_node.name = zone_def.name
     input_node.location = zone_def.location
+    if zone_def.output_location is not None:
+        output_node.location = zone_def.output_location
 
-    # Items live on the output node; input items surface as the input node's
-    # outputs, output items as the output node's inputs.
     for item_def in zone_def.inputs:
         output_node.input_items.new(
             _short_socket_type(item_def.socket_type), item_def.name)
@@ -964,7 +959,6 @@ def _build_closure_zone(zone_def: ClosureZoneDef, node_tree, node_map: dict,
         output_node.output_items.new(
             _short_socket_type(item_def.socket_type), item_def.name)
 
-    # External refs read the Closure socket via the zone name: output 0.
     node_map[zone_def.name] = output_node
 
     return _build_zone_body(zone_def, "closure", 0, input_node, output_node,

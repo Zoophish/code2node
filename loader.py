@@ -1,17 +1,5 @@
-# Copyright (C) 2026, Sam Warren, All rights reserved.
-"""
-Cross-file tree loading.
-
-A tree name is a datablock identity, as in Blender: defined once, referenced
-by name anywhere. An import statement brings trees from another module into
-the importing document's namespace — the selected trees plus their transitive
-dependencies, or the whole module when no selection is given. Module paths
-resolve relative to the importing file. Runs without Blender.
-
-load(path) returns the full closure as a flat list in build order (imported
-trees before the trees that reference them), deduplicated across diamond
-imports. The same name from two different definitions is an error.
-"""
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Sam Warren
 from pathlib import Path
 
 from . import format as fmt
@@ -23,7 +11,6 @@ class LoadError(NodeIOError):
 
 
 def _dependencies(tree: TreeDef) -> set[str]:
-    """Names of trees this tree references as groups."""
     names = {n.node_tree_name for n in tree.nodes if n.node_tree_name}
     for zone in tree.zones:
         names |= {n.node_tree_name for n in zone.nodes if n.node_tree_name}
@@ -32,8 +19,7 @@ def _dependencies(tree: TreeDef) -> set[str]:
 
 def _closure(requested: list[str], trees: list[TreeDef],
              origin: Path) -> list[TreeDef]:
-    """The requested trees plus their transitive dependencies, in the
-    original file order (dependencies were defined earlier in the file)."""
+    """The requested trees and their dependencies, in file order."""
     by_name = {t.name: t for t in trees}
     needed: set[str] = set()
     stack = list(requested)
@@ -52,9 +38,6 @@ def _closure(requested: list[str], trees: list[TreeDef],
 
 
 def _resolve_module(module: str, base_dir: Path) -> Path:
-    """Resolve a dotted module path to a .nodes file. Segments map to path
-    components under base_dir; each leading dot beyond the first climbs one
-    directory."""
     stripped = module.lstrip('.')
     ups = len(module) - len(stripped)
     d = base_dir
@@ -66,6 +49,8 @@ def _resolve_module(module: str, base_dir: Path) -> Path:
 
 def load(path: str | Path, _cache: dict | None = None,
          _stack: tuple = ()) -> list[TreeDef]:
+    """Trees in build order, imports first, deduplicated across diamond
+    imports."""
     path = Path(path).resolve()
     if _cache is None:
         _cache = {}
@@ -108,5 +93,4 @@ def load(path: str | Path, _cache: dict | None = None,
 
 
 def flatten(path: str | Path) -> str:
-    """The resolved closure as a single self-contained document."""
     return "\n\n".join(fmt.serialise(t) for t in load(path))

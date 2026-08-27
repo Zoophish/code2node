@@ -1,23 +1,5 @@
-# Copyright (C) 2026, Sam Warren, All rights reserved.
-"""
-Expression compiler: a formula string lowers to Math nodes inside a frame.
-
-Each expression type is the closure of a Math node family under composition:
-literals, bound identifiers, unary minus, operators, parentheses, and calls
-in standard math shorthand, each mapping onto one node operation.
-`expr<float>` is the closure of the float Math node; `expr<int>` of the
-integer math and bit math nodes. Compilation runs at
-document parse time: lexer, Pratt parser, constant folding, common
-subexpression elimination, deterministic emission. The final node takes the
-expression's name, so downstream references resolve like any node's.
-
-Folding computes each operation's mathematical definition at full python
-precision; it does not model the runtime representation (float32 rounding,
-int32 wraparound). Cases the runtime defines but the definition does not
-(division by zero, negative integer exponents) stay nodes, and an integer
-constant that folds outside int32 range is a compile error rather than a
-silent divergence from the wrapping nodes.
-"""
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Sam Warren
 import math
 
 from .core import LinkDef, NodeDef, SocketRef
@@ -34,10 +16,9 @@ INT_MIN, INT_MAX = -2**31, 2**31 - 1
 
 
 # ---------------------------------------------------------------------------
-# Float tables: the float Math node closure
+# Float tables
 # ---------------------------------------------------------------------------
 
-# operation -> arity, keyed by the ShaderNodeMath enum.
 ARITY = {
     'ADD': 2, 'SUBTRACT': 2, 'MULTIPLY': 2, 'DIVIDE': 2, 'POWER': 2,
     'LOGARITHM': 2, 'SQRT': 1, 'INVERSE_SQRT': 1, 'ABSOLUTE': 1,
@@ -50,9 +31,6 @@ ARITY = {
     'TANH': 1, 'RADIANS': 1, 'DEGREES': 1, 'MULTIPLY_ADD': 3,
 }
 
-# Surface names are standard math shorthand; each maps onto a Math
-# operation. `%` is Blender's MODULO (truncated); mod() is floored, the
-# useful one for cyclic indexing.
 FUNCTIONS = {
     'sin': 'SINE', 'cos': 'COSINE', 'tan': 'TANGENT',
     'asin': 'ARCSINE', 'acos': 'ARCCOSINE', 'atan': 'ARCTANGENT',
@@ -69,14 +47,11 @@ FUNCTIONS = {
     'smooth_max': 'SMOOTH_MAX', 'multiply_add': 'MULTIPLY_ADD',
 }
 
-# Named constants: literals with names. An inputs binding of the same name
-# shadows the constant.
 CONSTANTS = {'pi': math.pi, 'tau': math.tau, 'e': math.e}
 
 BINOPS = {'+': 'ADD', '-': 'SUBTRACT', '*': 'MULTIPLY', '/': 'DIVIDE',
           '%': 'MODULO', '^': 'POWER'}
 
-# precedence: (level, right_associative)
 PRECEDENCE = {'+': (1, False), '-': (1, False), '*': (2, False),
               '/': (2, False), '%': (2, False), '^': (4, True)}
 UNARY_PRECEDENCE = 3
@@ -103,16 +78,8 @@ PYFOLD = {
 
 
 # ---------------------------------------------------------------------------
-# Int tables: the integer math + bit math node closure
+# Int tables
 # ---------------------------------------------------------------------------
-# The two enums share no names, so one operation namespace covers both.
-# Semantics measured in Blender 5.1.1: DIVIDE truncates toward zero,
-# DIVIDE_ROUND rounds half away from zero, MODULO is truncated and
-# FLOORED_MODULO floored (matching the float surface's `%`/`mod` split),
-# x/0 and x%0 are 0, POWER with a negative exponent is 0, GCD/LCM take
-# absolute values, and overflow wraps two's complement. SHIFT is left for
-# positive counts and a *logical* right shift for negative; ROTATE is a
-# 32-bit rotate, negative counts rotating right.
 
 INT_ARITY = {
     'ADD': 2, 'SUBTRACT': 2, 'MULTIPLY': 2, 'DIVIDE': 2, 'MULTIPLY_ADD': 3,
@@ -163,7 +130,6 @@ INT_PYFOLD = {
     'GCD': math.gcd, 'LCM': math.lcm,
     'AND': lambda a, b: a & b, 'OR': lambda a, b: a | b,
     'XOR': lambda a, b: a ^ b, 'NOT': lambda a: ~a,
-    # SHIFT and ROTATE are representation operations; they stay nodes.
 }
 
 
@@ -171,11 +137,9 @@ INT_PYFOLD = {
 # Backends
 # ---------------------------------------------------------------------------
 
-# bl_idname -> default operation (the property is omitted when it matches).
 _DEFAULT_OP = {'ShaderNodeMath': 'ADD', 'FunctionNodeIntegerMath': 'ADD',
                'FunctionNodeBitMath': 'AND'}
 
-# BitMath's third socket is Shift; two-argument SHIFT/ROTATE skip socket 1.
 _INT_OPS = {}
 for _op, _ar in INT_ARITY.items():
     if _op in ('AND', 'OR', 'XOR'):
@@ -190,8 +154,6 @@ for _op, _ar in INT_ARITY.items():
 
 
 class _Backend:
-    """One expression type: its surface language and its target nodes."""
-
     def __init__(self, name, binops, functions, arity, pyfold, constants, ops):
         self.name = name
         self.binops = binops
@@ -418,11 +380,9 @@ def _key(ast):
     return ('call', ast[1], tuple(_key(a) for a in ast[2]))
 
 
-def compile_expression(name: str, formula: str, bindings: dict,
+def compile_expression(name: str, formula: str,
+                       bindings: dict[str, SocketRef | float],
                        location=(0.0, 0.0), dtype: str = 'float'):
-    """Lower a formula to (nodes, links). `bindings` maps identifier ->
-    SocketRef (connection) or literal. Nodes comprise the Math nodes, the
-    final one named `name`, and a frame labelled with the formula."""
     backend = BACKENDS[dtype]
     ast = _Parser(_lex(formula), backend).parse()
 
@@ -437,9 +397,6 @@ def compile_expression(name: str, formula: str, bindings: dict,
     if unused:
         raise ExprError(f"binding(s) never used: {', '.join(unused)}", 0)
 
-    # Names become numbers where they can: literal bindings fold through
-    # like any constant; connections stay as vars. Unbound names resolve to
-    # the named constants (a binding shadows its constant).
     def substitute(node):
         if node[0] == 'var':
             if node[1] in bindings:

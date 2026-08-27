@@ -1,30 +1,10 @@
-![](./code2node_title.svg)
+<img src="./blendharness_512.png" align="right" width="180" alt="">
 
 # code2node
 
-Serialise and deserialise Blender node trees to a text DSL. Works with any node tree type that derives from Blender's `NodeTree` — shader, geometry, compositor, and custom tree types registered by other addons are all discovered automatically. Intended for LLM and agentic development of node networks.
-
-## Install
-
-Install as a Blender extension from the `code2node/` folder, or symlink it into your Blender addons path.
-
-## Editor support
-
-`vscode-nodes/` is a VS Code extension providing syntax highlighting, bracket
-matching, and folding for `.nodes` and `.nodetypes` files. Install by copying
-or symlinking the folder into `~/.vscode/extensions/`.
-
-## Blender UI
-
-The panel lives in **Node Editor > Sidebar (N) > Node IO**:
-
-- **Export Node Tree** — serialise the active node tree to a `.nodes` file
-- **Import Node Tree** — build a node tree from a `.nodes` file
-- **Generate Node Schema** — dump the full type universe to a directory (all tree types)
+Author Blender nodes as code instead of data files. Code2node is a library that serialises and compiles Blender node trees from a text based node language. It works with any node tree type that derives from Blender's `NodeTree`; i.e. shader, geometry, compositor, and custom tree types registered by other addons.
 
 ## CLI
-
-`schema` needs the Blender binary; `validate` and `roundtrip` run under plain `python3` — that's the fast pre-flight loop, no Blender startup.
 
 ```bash
 # Generate schema for all node types (writes registry.json + browsable .nodetypes)
@@ -41,13 +21,40 @@ python3 code2node/cli.py -- validate material.nodes schema/node_schema/registry.
 python3 code2node/cli.py -- roundtrip material.nodes cleaned.nodes
 ```
 
-## DSL Format
+## VSCode Support
+
+`vscode-nodes/` is a VS Code extension providing syntax highlighting, bracket matching, and folding for `.nodes` and `.nodetypes` files.
+
+Download the `.vsix` from the latest release, then install it from the
+Extensions view (`...` menu > Install from VSIX) or the command line:
+
+```bash
+code --install-extension blender-nodes-dsl-0.1.0.vsix
+```
+
+## Blender Extension
+
+Install as a Blender addon from the repo `code2node/` folder, or symlink it into your Blender addons path.
+
+**Node Editor > Sidebar (N) > code2node**:
+
+- **Export Node Tree** — serialise the active node tree to a `.nodes` file
+- **Import Node Tree** — build a node tree from a `.nodes` file
+- **Auto Layout** — arrange the active node tree: dataflow left to right,
+  frames and zones as blocks
+- **Generate Node Schema** — register every node type to a directory
+
+## Node Language Reference
+
+### Comments
 
 Comments are `//` to end of line and `/* */` blocks.
 
+### Preprocessor
+
 `#` starts a preprocessor directive. `#define NAME value` substitutes
 `NAME` (whole words, strings and formulas included) through the rest of
-the file. Defines are file-local and may use earlier defines.
+the file. Definitions are file-local and may use earlier definitions.
 
 ```
 #define SEGMENTS 28
@@ -57,20 +64,10 @@ node "Line" [GeometryNodeMeshLine] {
 }
 ```
 
-Sockets are addressed by **index**; the quoted name after the index is an
-annotation for readability. Indices are the structural identifier — get them
-from the schema detail files. The validator warns when an annotated name
-doesn't match the socket at that index.
-
-Group interface sockets may also be addressed by name alone —
-`("Step Count") = 28` on a group instance, `("Radius") -> "Group Input"(1)`.
-Interface names are author-chosen and stay stable while a library tool's
-parameter list evolves, so documents that instance nodelib groups keep
-meaning the same thing. Validation compiles name refs to indices; the
-serialised form is always indexed. Names resolve on group instances,
-`Group Input`/`Group Output`, and `"repeat"` zone items.
-
 ### Trees
+
+`tree` blocks define node trees in Blender. Each materialises as a
+datablock with the tree's name.
 
 ```
 tree "My Material" [ShaderNodeTree] {
@@ -90,7 +87,7 @@ node "Principled BSDF" [ShaderNodeBsdfPrincipled] @(-200, 100) {
 }
 ```
 
-- `[Type]` — Blender node type identifier in brackets
+- `[Type]` — Blender node type identifier
 - `@(x, y)` — node position (optional, integers)
 - `@(x, y, w=200, h=50)` — position with custom width/height (only when non-default)
 - `(index: "Name") -> "Node"(index: "Name")` — connection; this input is sourced
@@ -100,6 +97,18 @@ node "Principled BSDF" [ShaderNodeBsdfPrincipled] @(-200, 100) {
 - `=` values: numbers, `"strings"`, `true`/`false`, tuples `(0.8, 0.8, 0.8, 1.0)`
 - Entries are comma-delimited; names are always quoted
 - Properties and socket values are only emitted when they differ from factory defaults
+
+Sockets are addressed by **index**; the quoted name after the index is an
+annotation for readability. Indices are the structural identifier — get them
+from the schema detail files. The validator warns when an annotated name
+doesn't match the socket at that index.
+
+Group interface sockets may also be addressed by name alone —
+`("Step Count") = 28` on a group instance, `("Radius") -> "Group Input"(1)`.
+Names resolve on group instances, `Group Input`/`Group Output`, and
+`"repeat"` zone items, and keep working when a group's sockets are added
+or reordered. Validation compiles name refs to indices, and output files
+use indices.
 
 ### Node Groups
 
@@ -149,8 +158,7 @@ node "My Instance" [ShaderNodeGroup] {
 
 ### Inline Trees
 
-An `inline` tree allows code reuse without manifesting as a datablock in
-Blender: it exists at compile time only, and each instance expands to a
+An `inline` tree exists at compile time only (does not generate a datablock). Each instance expands to a
 copy of the body, framed under the instance's name.
 
 ```
@@ -161,47 +169,45 @@ inline tree "Add One" [GeometryNodeTree] {
 
 ### Imports
 
-A tree name is a datablock identity, as in Blender: defined once, referenced
-by name anywhere. Imports bring trees from other files into the document's
-namespace. Module paths are python-style — dots separate segments, leading
-dots climb directories from the importing file (none or one = same
-directory), and the `.nodes` extension is implied:
+Imports bring trees from other files into the document's namespace. Module
+paths use dots between segments, and leading dots climb directories from
+the importing file (none or one = same directory). The `.nodes` extension
+is implied.
 
 ```
 import helpers, curves
-import ..nodelib.masonry { tree "Voussoir Ring", tree "Stone Pillar" }
+import ..lib.masonry { tree "Arch", tree "Pillar" }
 ```
 
-A comma list imports several modules whole; a tree selection applies to a
-single module.
+A comma list imports whole modules. The braced form takes only the named
+trees and their dependencies.
 
-The braced form imports the named trees plus whatever trees they depend on;
-entries are typed, and `tree` is the only importable kind. Without braces,
-every tree in the file. Imported trees build before the document's own, so
-`node_tree = "Voussoir Ring"` resolves as usual. The same name from two
-different definitions is an error — rename at the source. `loader.load(path)`
-resolves a file's full closure; `bh apply` does this automatically.
+Imported trees build before the trees that reference them. A tree reached
+by two import paths is deduplicated; two different trees sharing a name
+must be renamed at the source.
 
 ### Expressions
 
 An `expr` block expands a formula in place to math nodes inside a frame
-labelled with the source. The type is the domain the formula computes in:
-`expr<float>` expands to Math nodes, `expr<int>` to Integer Math and Bit
-Math nodes. The final node takes the block's name, so other nodes reference
-`"falloff"(0)` as usual. Free identifiers bind in `inputs` to a connection or a literal.
-Formula errors surface at parse time with the column:
-`expr "falloff": formula col 14: ...`.
+labelled with the source. Its type governs which operators and functions
+are available, and how the arithmetic behaves: `expr<float>` expands to
+Math nodes, `expr<int>` to Integer Math and Bit Math nodes. The final
+node takes the block's name. Free identifiers bind in `inputs` to a
+connection or a literal.
 
 Float functions are standard math shorthand (`sin`, `min`, `floor`,
-`cosh`, …), each a Math operation; operators are `+ - * / % ^`; `pi`,
-`tau` and `e` are named constants. Int functions are `abs`, `sign`, `min`,
-`max`, `pow`, `multiply_add`, `mod`, `div_round`, `div_floor`, `div_ceil`,
-`gcd`, `lcm`, `band`, `bor`, `bxor`, `bnot`, `shift`, `rotate`; operators
-are `+ - * / %` (`^` reads two ways for integers — write `pow()` or
-`bxor()`). In both types `/` and `%` follow the node (truncated) and
-`mod()` is floored, the useful one for cyclic indexing. Int arithmetic
-wraps at 32 bits at runtime; a constant that folds outside that range is a
-compile error. Literals must be whole numbers in an int formula.
+`cosh`, …), each a Math operation. Operators are `+ - * / % ^`, and `pi`,
+`tau` and `e` are named constants.
+
+Int functions are `abs`, `sign`, `min`, `max`, `pow`, `multiply_add`,
+`mod`, `div_round`, `div_floor`, `div_ceil`, `gcd`, `lcm`, `band`, `bor`,
+`bxor`, `bnot`, `shift`, `rotate`. Operators are `+ - * / %` (`^` reads
+two ways for integers — write `pow()` or `bxor()`).
+
+In both types `/` and `%` follow the node (truncated) and `mod()` is
+floored. Int arithmetic wraps at 32 bits at runtime, and a constant that
+folds outside that range produces a compile error. Literals must be whole
+numbers in an int formula.
 
 ```
 expr<float> "falloff" @(-400, 300) {
@@ -226,24 +232,32 @@ expr<int> "pla_id" {
 Repeat zones replace unrolled loop patterns with a single iterated block:
 
 ```
-repeat "Ray March" @(-500, 100) {
-  iterations = 32
+repeat "Accumulate" @(-500, 100) {
+  iterations = 16
   items {
-    "t": [NodeSocketFloat] = 0.0,
-    "search mag": [NodeSocketFloat] = 0.0,
+    "total": [NodeSocketFloat] = 0.0,
+    "step": [NodeSocketFloat] = 1.0,
   }
 
-  node "Evaluate" [ShaderNodeGroup] {
-    node_tree = "sp_EvaluateQuadric"
+  node "Add Step" [ShaderNodeMath] {
+    operation = "ADD"
     inputs {
-      (0: "t") -> "repeat"(0: "t"),
-      (1: "search mag") -> "repeat"(1: "search mag"),
+      (0) -> "repeat"(0: "total"),
+      (1) -> "repeat"(1: "step"),
+    }
+  }
+
+  node "Halve Step" [ShaderNodeMath] {
+    operation = "MULTIPLY"
+    inputs {
+      (0) -> "repeat"(1: "step"),
+      (1) = 0.5,
     }
   }
 
   outputs {
-    "t" -> "Evaluate"(0),
-    "search mag" -> "Evaluate"(1),
+    "total" -> "Add Step"(0),
+    "step" -> "Halve Step"(0),
   }
 }
 ```
@@ -314,7 +328,7 @@ The schema generator writes a machine-readable registry plus browsable text:
 ```
 node_schema/
   README.md
-  registry.json        # full universe as JSON (types, properties, per-variant sockets)
+  registry.json        # every node type as JSON (types, properties, per-variant sockets)
   ShaderNodeTree/
     index.nodetypes    # one summary entry per node type
     ShaderNodeMath.nodetypes
@@ -324,17 +338,21 @@ node_schema/
     ...
 ```
 
-Detail files carry full property definitions, enum values, and socket
-signatures per variant — this is where socket indices come from.
+Socket indices come from the detail files, which list each variant's
+properties, enum values and sockets.
 
 ## Module Structure
 
 | File | Purpose |
 |------|---------|
-| `core.py` | IR dataclasses (`TreeDef`, `NodeDef`, `LinkDef`, `RepeatZoneDef`, `ClosureZoneDef`) and `bpy.NodeTree` ↔ IR conversion |
-| `format.py` | DSL text ↔ IR serialisation, schema text formatting |
-| `schema.py` | Introspects `bpy.types` to extract the full node type universe; JSON round-trip |
-| `validate.py` | Offline validation of parsed trees against the registry (no bpy) |
-| `cli.py` | Headless CLI (`validate`/`roundtrip` run under python3; `schema` needs Blender) |
-| `blender_addon.py` | Addon operators and panel (requires bpy) |
-| `__init__.py` | Package init; registers the addon when bpy is present |
+| `core.py` | IR dataclasses and node tree ↔ IR conversion |
+| `preprocessor.py` | Source text substitution ahead of the parser |
+| `format.py` | Node language ↔ IR serialisation, schema text formatting |
+| `expr.py` | Formula compiler |
+| `expand.py` | Inline tree expansion |
+| `loader.py` | Cross-file imports and dependency resolution |
+| `schema.py` | `bpy` node type introspection and registry (requires Blender) |
+| `validate.py` | Offline validation of parsed trees against the registry |
+| `layout.py` | Automatic node layout solver |
+| `cli.py` | Headless Python CLI |
+| `blender_addon.py` | Blender addon operators and panel |

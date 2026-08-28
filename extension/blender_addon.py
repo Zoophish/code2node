@@ -5,8 +5,8 @@ import bpy
 from bpy.props import BoolProperty, StringProperty
 from bpy_extras.io_utils import ExportHelper, ImportHelper
 
-from . import core, expand, format, layout, loader, schema, validate
-from .core import NodeIOError
+from .code2node import core, expand, format, layout, loader, schema, validate
+from .code2node.core import NodeIOError
 
 
 # ---------------------------------------------------------------------------

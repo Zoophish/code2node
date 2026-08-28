@@ -1,3 +1,6 @@
 __pycache__/
 *.vsix
 .DS_Store
+dist/
+extension/code2node/
+extension/LICENSE

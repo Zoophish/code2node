@@ -34,7 +34,7 @@ code --install-extension blender-nodes-dsl-0.1.0.vsix
 
 ## Blender Extension
 
-Install as a Blender addon from the repo `code2node/` folder, or symlink it into your Blender addons path.
+Install `code2node-<version>.zip` from the latest release.
 
 **Node Editor > Sidebar (N) > code2node**:
 
@@ -355,4 +355,3 @@ properties, enum values and sockets.
 | `validate.py` | Offline validation of parsed trees against the registry |
 | `layout.py` | Automatic node layout solver |
 | `cli.py` | Headless Python CLI |
-| `blender_addon.py` | Blender addon operators and panel |

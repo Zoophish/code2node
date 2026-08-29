@@ -1,0 +1,476 @@
+// shell/support.nodes — one upward pass of "nothing hangs in the air".
+//
+// Losses drawn per stone let a stone keep its place after everything holding
+// it up has gone. This is the fix: a stone survives only if the course below
+// holds it up where it actually bears — under the centre of its bed, or
+// under both ends at once, which is a stone bridging a gap. A stone held at
+// one end only is a cantilever and falls. Run the step once per course,
+// bottom to top, and a hole opens upward into a ragged edge instead of
+// leaving stones floating.
+//
+// The lookup is the jumper clamp's trick with the plan left in: each stone
+// is laid as a segment from p0 to p1 in a fake space where x and y are the
+// plan and z is its course number times a large stride, so a nearest-edge
+// query can only reach the course below but can reach any panel in it —
+// and the nearest segment to a probe point is the stone that actually
+// contains it, where the nearest stone by midpoint need not be. Reaching
+// any panel matters at a corner, where a quoin is held up by the quoin of
+// the other panel and a per-panel lookup would call every quoin unsupported.
+//
+// Support is tested against the bed itself: a stone is described by the two
+// ends of its centreline, and a probe point counts as held if it lands inside
+// a surviving stone's plan rectangle.
+//
+// A jumper stands into the course above its own, so what it holds up is what
+// beds on that one: stones are stacked by mas_top, the course they reach the
+// top of, and each asks the row directly below its own mas_crs.
+//
+// Reads mas_p0, mas_p1, mas_stk, mas_act, mas_crs, mas_top; reads and writes
+// mas_lost.
+
+tree "mas Support Probe" [GeometryNodeTree] {
+  interface {
+    inputs {
+      "Alive": [NodeSocketGeometry],
+      "At": [NodeSocketFloat] = 0.5,
+    }
+    outputs {
+      "Hit": [NodeSocketFloat],
+    }
+  }
+
+  node "Group Input" [NodeGroupInput] @(-1200, 0) {
+  }
+
+  node "P0" [GeometryNodeInputNamedAttribute] @(-1200, -200) {
+    data_type = "FLOAT_VECTOR"
+    inputs {
+      (0: "Name") = "mas_p0",
+    }
+  }
+
+  node "P1" [GeometryNodeInputNamedAttribute] @(-1200, -340) {
+    data_type = "FLOAT_VECTOR"
+    inputs {
+      (0: "Name") = "mas_p1",
+    }
+  }
+
+  node "Crs" [GeometryNodeInputNamedAttribute] @(-1200, -480) {
+    inputs {
+      (0: "Name") = "mas_crs",
+    }
+  }
+
+  node "Top" [GeometryNodeInputNamedAttribute] @(-1200, -420) {
+    inputs {
+      (0: "Name") = "mas_top",
+    }
+  }
+
+  node "Act" [GeometryNodeInputNamedAttribute] @(-1200, -600) {
+    data_type = "BOOLEAN"
+    inputs {
+      (0: "Name") = "mas_act",
+    }
+  }
+
+  // ---- the point on my own bed that I am asking about --------------------
+
+  node "Bed" [ShaderNodeVectorMath] @(-960, -260) {
+    operation = "SUBTRACT"
+    inputs {
+      (0: "Vector") -> "P1"(0: "Attribute"),
+      (1: "Vector") -> "P0"(0: "Attribute"),
+    }
+  }
+
+  node "Bed At" [ShaderNodeVectorMath] @(-720, -260) {
+    operation = "SCALE"
+    inputs {
+      (0: "Vector") -> "Bed"(0: "Vector"),
+      (3: "Scale") -> "Group Input"("At"),
+    }
+  }
+
+  node "Q" [ShaderNodeVectorMath] @(-480, -260) {
+    inputs {
+      (0: "Vector") -> "P0"(0: "Attribute"),
+      (1: "Vector") -> "Bed At"(0: "Vector"),
+    }
+  }
+
+  node "Q XYZ" [ShaderNodeSeparateXYZ] @(-240, -260) {
+    inputs {
+      (0: "Vector") -> "Q"(0: "Vector"),
+    }
+  }
+
+  expr<float> "Below" @(-240, -480) {
+    expression = "(c - 1.0) * 1000.0"
+    inputs {
+      "c" -> "Crs"(0: "Attribute"),
+    }
+  }
+
+  node "Probe At" [ShaderNodeCombineXYZ] @(0, -360) {
+    inputs {
+      (0: "X") -> "Q XYZ"(0: "X"),
+      (1: "Y") -> "Q XYZ"(1: "Y"),
+      (2: "Z") -> "Below"(0: "Value"),
+    }
+  }
+
+  node "Near" [GeometryNodeSampleNearest] @(240, -360) {
+    domain = "EDGE"
+    inputs {
+      (0: "Geometry") -> "Group Input"("Alive"),
+      (1: "Sample Position") -> "Probe At"(0: "Vector"),
+    }
+  }
+
+  node "J P0" [GeometryNodeSampleIndex] @(480, -200) {
+    data_type = "FLOAT_VECTOR"
+    domain = "EDGE"
+    inputs {
+      (0: "Geometry") -> "Group Input"("Alive"),
+      (1: "Value") -> "P0"(0: "Attribute"),
+      (2: "Index") -> "Near"(0: "Index"),
+    }
+  }
+
+  node "J P1" [GeometryNodeSampleIndex] @(480, -340) {
+    data_type = "FLOAT_VECTOR"
+    domain = "EDGE"
+    inputs {
+      (0: "Geometry") -> "Group Input"("Alive"),
+      (1: "Value") -> "P1"(0: "Attribute"),
+      (2: "Index") -> "Near"(0: "Index"),
+    }
+  }
+
+  node "J Crs" [GeometryNodeSampleIndex] @(480, -480) {
+    domain = "EDGE"
+    inputs {
+      (0: "Geometry") -> "Group Input"("Alive"),
+      (1: "Value") -> "Top"(0: "Attribute"),
+      (2: "Index") -> "Near"(0: "Index"),
+    }
+  }
+
+  node "J Act" [GeometryNodeSampleIndex] @(480, -620) {
+    data_type = "BOOLEAN"
+    domain = "EDGE"
+    inputs {
+      (0: "Geometry") -> "Group Input"("Alive"),
+      (1: "Value") -> "Act"(0: "Attribute"),
+      (2: "Index") -> "Near"(0: "Index"),
+    }
+  }
+
+  // ---- does the probe land on that stone's bed at all --------------------
+  //
+  // Inside the supporting stone's own plan rectangle, not merely near it: a
+  // loose radius would let a stone one place along the course hold this one
+  // up, and the hole would never propagate. Half a thickness across is what
+  // lets a quoin rest on the other panel's quoin, where the two beds cross.
+
+  node "J Bed" [ShaderNodeVectorMath] @(720, -280) {
+    operation = "SUBTRACT"
+    inputs {
+      (0: "Vector") -> "J P1"(0: "Value"),
+      (1: "Vector") -> "J P0"(0: "Value"),
+    }
+  }
+
+  node "J Dir" [ShaderNodeVectorMath] @(960, -280) {
+    operation = "NORMALIZE"
+    inputs {
+      (0: "Vector") -> "J Bed"(0: "Vector"),
+    }
+  }
+
+  node "J Half" [ShaderNodeVectorMath] @(960, -140) {
+    operation = "LENGTH"
+    inputs {
+      (0: "Vector") -> "J Bed"(0: "Vector"),
+    }
+  }
+
+  node "Up" [ShaderNodeCombineXYZ] @(960, -700) {
+    inputs {
+      (2: "Z") = 1.0,
+    }
+  }
+
+  node "J Side" [ShaderNodeVectorMath] @(1200, -700) {
+    operation = "CROSS_PRODUCT"
+    inputs {
+      (0: "Vector") -> "J Dir"(0: "Vector"),
+      (1: "Vector") -> "Up"(0: "Vector"),
+    }
+  }
+
+  node "J Mid" [ShaderNodeVectorMath] @(720, -560) {
+    inputs {
+      (0: "Vector") -> "J P0"(0: "Value"),
+      (1: "Vector") -> "J P1"(0: "Value"),
+    }
+  }
+
+  node "J Centre" [ShaderNodeVectorMath] @(960, -560) {
+    operation = "SCALE"
+    inputs {
+      (0: "Vector") -> "J Mid"(0: "Vector"),
+      (3: "Scale") = 0.5,
+    }
+  }
+
+  node "To Q" [ShaderNodeVectorMath] @(1200, -420) {
+    operation = "SUBTRACT"
+    inputs {
+      (0: "Vector") -> "Q"(0: "Vector"),
+      (1: "Vector") -> "J Centre"(0: "Vector"),
+    }
+  }
+
+  node "Along" [ShaderNodeVectorMath] @(1440, -420) {
+    operation = "DOT_PRODUCT"
+    inputs {
+      (0: "Vector") -> "To Q"(0: "Vector"),
+      (1: "Vector") -> "J Dir"(0: "Vector"),
+    }
+  }
+
+  node "Across" [ShaderNodeVectorMath] @(1440, -700) {
+    operation = "DOT_PRODUCT"
+    inputs {
+      (0: "Vector") -> "To Q"(0: "Vector"),
+      (1: "Vector") -> "J Side"(0: "Vector"),
+    }
+  }
+
+  node "Stk" [GeometryNodeInputNamedAttribute] @(1440, -860) {
+    inputs {
+      (0: "Name") = "mas_stk",
+    }
+  }
+
+  // an empty cloud samples as index 0 with every value at its default, so
+  // requiring the found stone to be active and to be exactly one course down
+  // makes the no-survivors case report no support rather than false support
+
+  expr<float> "Hit" @(1920, -560) {
+    expression =
+      "jact * compare(jc, c - 1.0, 0.5)
+       * less_than(abs(a), 0.5 * l + 0.01) * less_than(abs(b), 0.5 * t + 0.02)"
+    inputs {
+      "jact" -> "J Act"(0: "Value"),
+      "jc" -> "J Crs"(0: "Value"),
+      "c" -> "Crs"(0: "Attribute"),
+      "a" -> "Along"(1: "Value"),
+      "b" -> "Across"(1: "Value"),
+      "l" -> "J Half"(1: "Value"),
+      "t" -> "Stk"(0: "Attribute"),
+    }
+  }
+
+  node "Group Output" [NodeGroupOutput] @(2440, 0) {
+    inputs {
+      ("Hit") -> "Hit"(0: "Value"),
+    }
+  }
+}
+
+tree "mas Loss Step" [GeometryNodeTree] {
+  interface {
+    inputs {
+      "Grid": [NodeSocketGeometry],
+    }
+    outputs {
+      "Grid": [NodeSocketGeometry],
+    }
+  }
+
+  node "Group Input" [NodeGroupInput] @(-1000, 0) {
+  }
+
+  node "Act" [GeometryNodeInputNamedAttribute] @(-1000, -240) {
+    data_type = "BOOLEAN"
+    inputs {
+      (0: "Name") = "mas_act",
+    }
+  }
+
+  node "Lost" [GeometryNodeInputNamedAttribute] @(-1000, -360) {
+    inputs {
+      (0: "Name") = "mas_lost",
+    }
+  }
+
+  node "P0" [GeometryNodeInputNamedAttribute] @(-1000, -480) {
+    data_type = "FLOAT_VECTOR"
+    inputs {
+      (0: "Name") = "mas_p0",
+    }
+  }
+
+  node "P1" [GeometryNodeInputNamedAttribute] @(-1000, -620) {
+    data_type = "FLOAT_VECTOR"
+    inputs {
+      (0: "Name") = "mas_p1",
+    }
+  }
+
+  node "Crs" [GeometryNodeInputNamedAttribute] @(-1000, -760) {
+    inputs {
+      (0: "Name") = "mas_crs",
+    }
+  }
+
+  expr<float> "Gone" @(-760, -300) {
+    expression = "1.0 - act * (1.0 - lost)"
+    inputs {
+      "act" -> "Act"(0: "Attribute"),
+      "lost" -> "Lost"(0: "Value"),
+    }
+  }
+
+  node "Survivors" [GeometryNodeDeleteGeometry] @(-520, 100) {
+    inputs {
+      (0: "Geometry") -> "Group Input"("Grid"),
+      (1: "Selection") -> "Gone"(0: "Value"),
+    }
+  }
+
+  // each survivor becomes a segment, its bed from p0 to p1, laid in the fake
+  // space — the nearest segment to a probe point is then the stone that
+  // actually contains it, where the nearest stone by midpoint need not be
+
+  node "Seg" [GeometryNodeMeshLine] @(-760, -540) {
+    inputs {
+      (0: "Count") = 2,
+      (3: "Offset") = (0.0, 0.0, 0.0),
+    }
+  }
+
+  node "Seg Inst" [GeometryNodeInstanceOnPoints] @(-520, -440) {
+    inputs {
+      (0: "Points") -> "Survivors"(0: "Geometry"),
+      (2: "Instance") -> "Seg"(0: "Mesh"),
+    }
+  }
+
+  node "Seg Real" [GeometryNodeRealizeInstances] @(-280, -440) {
+    inputs {
+      (0: "Geometry") -> "Seg Inst"(0: "Instances"),
+    }
+  }
+
+  node "SV Idx" [GeometryNodeInputIndex] @(-520, -620) {
+  }
+
+  expr<float> "SV Par" @(-280, -620) {
+    expression = "mod(i, 2.0)"
+    inputs {
+      "i" -> "SV Idx"(0: "Index"),
+    }
+  }
+
+  node "End Mix" [ShaderNodeMix] @(-40, -540) {
+    data_type = "VECTOR"
+    inputs {
+      (0: "Factor") -> "SV Par"(0: "Value"),
+      (4: "A") -> "P0"(0: "Attribute"),
+      (5: "B") -> "P1"(0: "Attribute"),
+    }
+  }
+
+  node "End XYZ" [ShaderNodeSeparateXYZ] @(180, -540) {
+    inputs {
+      (0: "Vector") -> "End Mix"(1: "Result"),
+    }
+  }
+
+  node "Top" [GeometryNodeInputNamedAttribute] @(-280, -880) {
+    inputs {
+      (0: "Name") = "mas_top",
+    }
+  }
+
+  expr<float> "Row" @(-280, -760) {
+    expression = "c * 1000.0"
+    inputs {
+      "c" -> "Top"(0: "Attribute"),
+    }
+  }
+
+  node "At" [ShaderNodeCombineXYZ] @(400, -640) {
+    inputs {
+      (0: "X") -> "End XYZ"(0: "X"),
+      (1: "Y") -> "End XYZ"(1: "Y"),
+      (2: "Z") -> "Row"(0: "Value"),
+    }
+  }
+
+  node "Alive" [GeometryNodeSetPosition] @(-40, 100) {
+    inputs {
+      (0: "Geometry") -> "Seg Real"(0: "Geometry"),
+      (2: "Position") -> "At"(0: "Vector"),
+    }
+  }
+
+  node "P Low" [GeometryNodeGroup] @(240, -200) {
+    node_tree = "mas Support Probe"
+    inputs {
+      ("Alive") -> "Alive"(0: "Geometry"),
+      ("At") = 0.15,
+    }
+  }
+
+  node "P Mid" [GeometryNodeGroup] @(240, -400) {
+    node_tree = "mas Support Probe"
+    inputs {
+      ("Alive") -> "Alive"(0: "Geometry"),
+      ("At") = 0.5,
+    }
+  }
+
+  node "P High" [GeometryNodeGroup] @(240, -600) {
+    node_tree = "mas Support Probe"
+    inputs {
+      ("Alive") -> "Alive"(0: "Geometry"),
+      ("At") = 0.85,
+    }
+  }
+
+  // the bottom course beds on the ground and needs nothing under it; above
+  // it a stone stands on its centre, or on both ends bridging a gap
+
+  expr<float> "New Lost" @(520, -400) {
+    expression =
+      "min(1.0, lost + act * (1.0 - min(1.0, less_than(c, 0.5) + b + a * d)))"
+    inputs {
+      "lost" -> "Lost"(0: "Value"),
+      "act" -> "Act"(0: "Attribute"),
+      "c" -> "Crs"(0: "Attribute"),
+      "a" -> "P Low"(0: "Hit"),
+      "b" -> "P Mid"(0: "Hit"),
+      "d" -> "P High"(0: "Hit"),
+    }
+  }
+
+  node "Write" [GeometryNodeStoreNamedAttribute] @(800, 100) {
+    inputs {
+      (0: "Geometry") -> "Group Input"("Grid"),
+      (2: "Name") = "mas_lost",
+      (3: "Value") -> "New Lost"(0: "Value"),
+    }
+  }
+
+  node "Group Output" [NodeGroupOutput] @(1060, 100) {
+    inputs {
+      ("Grid") -> "Write"(0: "Geometry"),
+    }
+  }
+}

@@ -1,0 +1,2178 @@
+import panels
+import support
+import core
+import partition
+import jumpers
+import stone
+
+// shell/wall.nodes — coursed stonework from a shell.
+//
+// Feed it a shell: the wall surface with no thickness, standing on a flat
+// base. mas Shell Panels reads the topology off it — panels, corners, free
+// ends, heights — and hands back one spline per panel. Everything after that
+// works in arc length along a spline, so a panel that curves is not a special
+// case: it is the same layout with a curved ruler.
+//
+// One course stack is cut for the whole wall from the shell's height, every
+// panel's length is cut into blocks of irregular width, and every block
+// becomes a closed weathered solid. Corners are quoined, alternating course by
+// course; a stone that would poke above the shell is not laid.
+//
+// Two things the box-massing tool could not do:
+//
+//   losses hold each other up — a stone is lost if its own draw says so or if
+//   nothing under it survived, settled bottom-up one course at a time, so a
+//   hole opens into a ragged edge rather than leaving stones in mid-air
+//
+//   exposure drives the wear — how close a stone is to the top of the wall or
+//   to a free end raises its chance of being lost, deepens its chips and
+//   nibbles its size, so a ruin loses its edges first
+//
+// Layout is a flat grid, one point per potential stone:
+//   panel r = index / 2304, course c = (index / 48) mod 48, slot j = index mod 48
+//
+// Origin and scale: the tool builds in the shell's own space and adds nothing
+// outside it. Sizes are metres. Hash channels 20-25 belong to this file.
+
+tree "Shell Masonry Wall" [GeometryNodeTree] {
+  interface {
+    inputs {
+      "Geometry": [NodeSocketGeometry],
+      "Thickness": [NodeSocketFloat] = 0.5,
+      "Curve Angle": [NodeSocketFloat] = 30.0,
+      "Min Block Width": [NodeSocketFloat] = 0.35,
+      "Max Block Width": [NodeSocketFloat] = 0.75,
+      "Min Course Height": [NodeSocketFloat] = 0.18,
+      "Max Course Height": [NodeSocketFloat] = 0.32,
+      "Jumper Chance": [NodeSocketFloat] = 0.3,
+      "Quoin Length": [NodeSocketFloat] = 0.3,
+      "Mortar Gap": [NodeSocketFloat] = 0.015,
+      "Edge Rounding": [NodeSocketFloat] = 0.02,
+      "Irregularity": [NodeSocketFloat] = 0.006,
+      "Chip Chance": [NodeSocketFloat] = 0.2,
+      "Chip Depth": [NodeSocketFloat] = 0.05,
+      "Missing Chance": [NodeSocketFloat] = 0.0,
+      "Wear": [NodeSocketFloat] = 0.0,
+      "Wear Height": [NodeSocketFloat] = 0.7,
+      "Wear Reach": [NodeSocketFloat] = 0.9,
+      "Wear Bite": [NodeSocketFloat] = 0.03,
+      "Seed": [NodeSocketInt] = 0,
+    }
+    outputs {
+      "Geometry": [NodeSocketGeometry],
+    }
+  }
+
+  node "Group Input" [NodeGroupInput] @(-2600, 0) {
+  }
+
+  // ---- A: the shell becomes panels ---------------------------------------
+
+  node "Panels" [GeometryNodeGroup] @(-2360, 200) {
+    node_tree = "mas Shell Panels"
+    inputs {
+      ("Shell") -> "Group Input"("Geometry"),
+      ("Curve Angle") -> "Group Input"("Curve Angle"),
+      ("Thickness") -> "Group Input"("Thickness"),
+    }
+  }
+
+  node "P H" [GeometryNodeInputNamedAttribute] @(-2360, -300) {
+    inputs {
+      (0: "Name") = "mas_h",
+    }
+  }
+
+  node "P Thk" [GeometryNodeInputNamedAttribute] @(-2360, -420) {
+    inputs {
+      (0: "Name") = "mas_thk",
+    }
+  }
+
+  node "P D" [GeometryNodeInputNamedAttribute] @(-2360, -540) {
+    inputs {
+      (0: "Name") = "mas_d",
+    }
+  }
+
+  node "P Own" [GeometryNodeInputNamedAttribute] @(-2360, -660) {
+    inputs {
+      (0: "Name") = "mas_own",
+    }
+  }
+
+  node "P Val" [GeometryNodeInputNamedAttribute] @(-2360, -780) {
+    inputs {
+      (0: "Name") = "mas_val",
+    }
+  }
+
+  node "P Len" [GeometryNodeSplineLength] @(-2360, -900) {
+  }
+
+  node "P D0" [GeometryNodeInputNamedAttribute] @(-2360, -1020) {
+    data_type = "FLOAT_VECTOR"
+    inputs {
+      (0: "Name") = "mas_d0",
+    }
+  }
+
+  node "P D1" [GeometryNodeInputNamedAttribute] @(-2360, -1140) {
+    data_type = "FLOAT_VECTOR"
+    inputs {
+      (0: "Name") = "mas_d1",
+    }
+  }
+
+  // ---- B: one course stack for the whole wall ----------------------------
+  //
+  // Courses belong to the wall as a whole: two panels meeting at a corner
+  // have to bed at the same levels or the quoins cannot interlock. The stack
+  // is cut once from the shell's own height, and a stone whose course rises
+  // above the shell where it stands is simply not laid.
+
+  expr<float> "Span H" @(-2120, 400) {
+    expression = "max(top - base, 0.0)"
+    inputs {
+      "top" -> "Panels"(3: "Top"),
+      "base" -> "Panels"(2: "Base"),
+    }
+  }
+
+  node "Courses" [GeometryNodePoints] @(-1640, 400) {
+    inputs {
+      (0: "Count") = 48,
+    }
+  }
+
+  node "K Index" [GeometryNodeInputIndex] @(-2120, 100) {
+  }
+
+  node "K Piece" [GeometryNodeGroup] @(-1880, 100) {
+    node_tree = "mas Hash Range"
+    inputs {
+      ("Y") -> "K Index"(0: "Index"),
+      ("Channel") = 20.0,
+      ("Seed") -> "Group Input"("Seed"),
+      ("Min") -> "Group Input"("Min Course Height"),
+      ("Max") -> "Group Input"("Max Course Height"),
+    }
+  }
+
+  expr<float> "K Mean" @(-1880, -100) {
+    expression = "(lo + hi) * 0.5"
+    inputs {
+      "lo" -> "Group Input"("Min Course Height"),
+      "hi" -> "Group Input"("Max Course Height"),
+    }
+  }
+
+  node "K Count" [GeometryNodeGroup] @(-1640, -100) {
+    node_tree = "mas Slot Count"
+    inputs {
+      ("Span") -> "Span H"(0: "Value"),
+      ("Mean") -> "K Mean"(0: "Value"),
+      ("Cap") = 48.0,
+    }
+  }
+
+  node "K Part" [GeometryNodeGroup] @(-1400, 100) {
+    node_tree = "mas Span Partition"
+    inputs {
+      ("Span") -> "Span H"(0: "Value"),
+      ("Slot") -> "K Index"(0: "Index"),
+      ("Count") -> "K Count"(0: "Count"),
+      ("Piece") -> "K Piece"(0: "Value"),
+    }
+  }
+
+  node "K St Z0" [GeometryNodeStoreNamedAttribute] @(-1160, 400) {
+    inputs {
+      (0: "Geometry") -> "Courses"(0: "Points"),
+      (2: "Name") = "mas_cz0",
+      (3: "Value") -> "K Part"(0: "Start"),
+    }
+  }
+
+  node "K St H" [GeometryNodeStoreNamedAttribute] @(-960, 400) {
+    inputs {
+      (0: "Geometry") -> "K St Z0"(0: "Geometry"),
+      (2: "Name") = "mas_ch",
+      (3: "Value") -> "K Part"(2: "Size"),
+    }
+  }
+
+  node "K St Act" [GeometryNodeStoreNamedAttribute] @(-760, 400) {
+    data_type = "BOOLEAN"
+    inputs {
+      (0: "Geometry") -> "K St H"(0: "Geometry"),
+      (2: "Name") = "mas_cact",
+      (3: "Value") -> "K Part"(3: "Active"),
+    }
+  }
+
+  node "C Z0" [GeometryNodeInputNamedAttribute] @(-760, 160) {
+    inputs {
+      (0: "Name") = "mas_cz0",
+    }
+  }
+
+  node "C H" [GeometryNodeInputNamedAttribute] @(-760, 40) {
+    inputs {
+      (0: "Name") = "mas_ch",
+    }
+  }
+
+  node "C Act" [GeometryNodeInputNamedAttribute] @(-760, -80) {
+    data_type = "BOOLEAN"
+    inputs {
+      (0: "Name") = "mas_cact",
+    }
+  }
+
+  // ---- C: one point per potential stone, 48 per course -------------------
+
+  expr<float> "Grid Total" @(-520, 600) {
+    expression = "n * 2304.0"
+    inputs {
+      "n" -> "Panels"(1: "Count"),
+    }
+  }
+
+  node "Grid" [GeometryNodePoints] @(-280, 600) {
+    inputs {
+      (0: "Count") -> "Grid Total"(0: "Value"),
+    }
+  }
+
+  node "G Index" [GeometryNodeInputIndex] @(-520, -200) {
+  }
+
+  expr<float> "G Run" @(-280, -200) {
+    expression = "floor(g / 2304.0)"
+    inputs {
+      "g" -> "G Index"(0: "Index"),
+    }
+  }
+
+  expr<float> "G Key" @(-280, -300) {
+    expression = "floor(g / 48.0)"
+    inputs {
+      "g" -> "G Index"(0: "Index"),
+    }
+  }
+
+  expr<float> "G Course" @(-40, -300) {
+    expression = "floor(g / 48.0) - floor(g / 2304.0) * 48.0"
+    inputs {
+      "g" -> "G Index"(0: "Index"),
+    }
+  }
+
+  expr<float> "G Slot" @(-280, -400) {
+    expression = "g - floor(g / 48.0) * 48.0"
+    inputs {
+      "g" -> "G Index"(0: "Index"),
+    }
+  }
+
+  expr<float> "G Odd" @(-40, -400) {
+    expression = "mod(floor(g / 48.0) - floor(g / 2304.0) * 48.0, 2.0)"
+    inputs {
+      "g" -> "G Index"(0: "Index"),
+    }
+  }
+
+  expr<float> "G Course Up" @(-40, -600) {
+    expression = "floor(g / 48.0) - floor(g / 2304.0) * 48.0 + 1.0"
+    inputs {
+      "g" -> "G Index"(0: "Index"),
+    }
+  }
+
+  node "G Run Int" [FunctionNodeFloatToInt] @(200, -200) {
+    inputs {
+      (0: "Float") -> "G Run"(0: "Value"),
+    }
+  }
+
+  node "G Key Int" [FunctionNodeFloatToInt] @(200, -300) {
+    inputs {
+      (0: "Float") -> "G Key"(0: "Value"),
+    }
+  }
+
+  node "G Course Int" [FunctionNodeFloatToInt] @(200, -400) {
+    inputs {
+      (0: "Float") -> "G Course"(0: "Value"),
+    }
+  }
+
+  node "G Course Up Int" [FunctionNodeFloatToInt] @(200, -600) {
+    inputs {
+      (0: "Float") -> "G Course Up"(0: "Value"),
+    }
+  }
+
+  // course properties, this course and the one above
+
+  node "S CZ0" [GeometryNodeSampleIndex] @(440, 400) {
+    inputs {
+      (0: "Geometry") -> "K St Act"(0: "Geometry"),
+      (1: "Value") -> "C Z0"(0: "Attribute"),
+      (2: "Index") -> "G Course Int"(0: "Integer"),
+    }
+  }
+
+  node "S CH" [GeometryNodeSampleIndex] @(440, 260) {
+    inputs {
+      (0: "Geometry") -> "K St Act"(0: "Geometry"),
+      (1: "Value") -> "C H"(0: "Attribute"),
+      (2: "Index") -> "G Course Int"(0: "Integer"),
+    }
+  }
+
+  node "S CAct" [GeometryNodeSampleIndex] @(440, 120) {
+    data_type = "BOOLEAN"
+    inputs {
+      (0: "Geometry") -> "K St Act"(0: "Geometry"),
+      (1: "Value") -> "C Act"(0: "Attribute"),
+      (2: "Index") -> "G Course Int"(0: "Integer"),
+    }
+  }
+
+  node "S CZ0 Up" [GeometryNodeSampleIndex] @(440, -20) {
+    inputs {
+      (0: "Geometry") -> "K St Act"(0: "Geometry"),
+      (1: "Value") -> "C Z0"(0: "Attribute"),
+      (2: "Index") -> "G Course Up Int"(0: "Integer"),
+    }
+  }
+
+  node "S CH Up" [GeometryNodeSampleIndex] @(440, -160) {
+    inputs {
+      (0: "Geometry") -> "K St Act"(0: "Geometry"),
+      (1: "Value") -> "C H"(0: "Attribute"),
+      (2: "Index") -> "G Course Up Int"(0: "Integer"),
+    }
+  }
+
+  node "S CAct Up" [GeometryNodeSampleIndex] @(440, -300) {
+    data_type = "BOOLEAN"
+    inputs {
+      (0: "Geometry") -> "K St Act"(0: "Geometry"),
+      (1: "Value") -> "C Act"(0: "Attribute"),
+      (2: "Index") -> "G Course Up Int"(0: "Integer"),
+    }
+  }
+
+  // ---- D: what this panel's course may fill ------------------------------
+  //
+  // Both ends of the panel are read off the spline. A free end stops where
+  // the shell stops; a corner reaches mas_d past the junction on the courses
+  // this panel owns and pulls mas_d back on the courses it does not; a stem
+  // at a T always pulls back to the through wall's face.
+
+  node "R Len" [GeometryNodeSampleIndex] @(440, -700) {
+    domain = "CURVE"
+    inputs {
+      (0: "Geometry") -> "Panels"(0: "Panels"),
+      (1: "Value") -> "P Len"(0: "Length"),
+      (2: "Index") -> "G Run Int"(0: "Integer"),
+    }
+  }
+
+  node "E0 D" [GeometryNodeSampleCurve] @(440, -900) {
+    inputs {
+      (0: "Curves") -> "Panels"(0: "Panels"),
+      (1: "Value") -> "P D"(0: "Attribute"),
+      (2: "Factor") = 0.0,
+      (4: "Curve Index") -> "G Run Int"(0: "Integer"),
+    }
+  }
+
+  node "E0 Own" [GeometryNodeSampleCurve] @(440, -1100) {
+    inputs {
+      (0: "Curves") -> "Panels"(0: "Panels"),
+      (1: "Value") -> "P Own"(0: "Attribute"),
+      (2: "Factor") = 0.0,
+      (4: "Curve Index") -> "G Run Int"(0: "Integer"),
+    }
+  }
+
+  node "E0 Val" [GeometryNodeSampleCurve] @(440, -1300) {
+    inputs {
+      (0: "Curves") -> "Panels"(0: "Panels"),
+      (1: "Value") -> "P Val"(0: "Attribute"),
+      (2: "Factor") = 0.0,
+      (4: "Curve Index") -> "G Run Int"(0: "Integer"),
+    }
+  }
+
+  node "E1 D" [GeometryNodeSampleCurve] @(440, -1500) {
+    inputs {
+      (0: "Curves") -> "Panels"(0: "Panels"),
+      (1: "Value") -> "P D"(0: "Attribute"),
+      (2: "Factor") = 1.0,
+      (4: "Curve Index") -> "G Run Int"(0: "Integer"),
+    }
+  }
+
+  node "E1 Own" [GeometryNodeSampleCurve] @(440, -1700) {
+    inputs {
+      (0: "Curves") -> "Panels"(0: "Panels"),
+      (1: "Value") -> "P Own"(0: "Attribute"),
+      (2: "Factor") = 1.0,
+      (4: "Curve Index") -> "G Run Int"(0: "Integer"),
+    }
+  }
+
+  node "E1 Val" [GeometryNodeSampleCurve] @(440, -1900) {
+    inputs {
+      (0: "Curves") -> "Panels"(0: "Panels"),
+      (1: "Value") -> "P Val"(0: "Attribute"),
+      (2: "Factor") = 1.0,
+      (4: "Curve Index") -> "G Run Int"(0: "Integer"),
+    }
+  }
+
+  // which way the mating wall leaves each junction: of the two edge
+  // directions the panel reader saw there, the mating one is the one not
+  // aligned with this panel's own end tangent
+
+  node "E0 V0" [GeometryNodeSampleCurve] @(200, -2300) {
+    data_type = "FLOAT_VECTOR"
+    inputs {
+      (0: "Curves") -> "Panels"(0: "Panels"),
+      (1: "Value") -> "P D0"(0: "Attribute"),
+      (2: "Factor") = 0.0,
+      (4: "Curve Index") -> "G Run Int"(0: "Integer"),
+    }
+  }
+
+  node "E0 V1" [GeometryNodeSampleCurve] @(200, -2500) {
+    data_type = "FLOAT_VECTOR"
+    inputs {
+      (0: "Curves") -> "Panels"(0: "Panels"),
+      (1: "Value") -> "P D1"(0: "Attribute"),
+      (2: "Factor") = 0.0,
+      (4: "Curve Index") -> "G Run Int"(0: "Integer"),
+    }
+  }
+
+  node "E1 V0" [GeometryNodeSampleCurve] @(200, -2700) {
+    data_type = "FLOAT_VECTOR"
+    inputs {
+      (0: "Curves") -> "Panels"(0: "Panels"),
+      (1: "Value") -> "P D0"(0: "Attribute"),
+      (2: "Factor") = 1.0,
+      (4: "Curve Index") -> "G Run Int"(0: "Integer"),
+    }
+  }
+
+  node "E1 V1" [GeometryNodeSampleCurve] @(200, -2900) {
+    data_type = "FLOAT_VECTOR"
+    inputs {
+      (0: "Curves") -> "Panels"(0: "Panels"),
+      (1: "Value") -> "P D1"(0: "Attribute"),
+      (2: "Factor") = 1.0,
+      (4: "Curve Index") -> "G Run Int"(0: "Integer"),
+    }
+  }
+
+  node "E0 Dot0" [ShaderNodeVectorMath] @(440, -2300) {
+    operation = "DOT_PRODUCT"
+    inputs {
+      (0: "Vector") -> "E0 D"(2: "Tangent"),
+      (1: "Vector") -> "E0 V0"(0: "Value"),
+    }
+  }
+
+  node "E0 Dot1" [ShaderNodeVectorMath] @(440, -2500) {
+    operation = "DOT_PRODUCT"
+    inputs {
+      (0: "Vector") -> "E0 D"(2: "Tangent"),
+      (1: "Vector") -> "E0 V1"(0: "Value"),
+    }
+  }
+
+  node "E1 Dot0" [ShaderNodeVectorMath] @(440, -2700) {
+    operation = "DOT_PRODUCT"
+    inputs {
+      (0: "Vector") -> "E1 D"(2: "Tangent"),
+      (1: "Vector") -> "E1 V0"(0: "Value"),
+    }
+  }
+
+  node "E1 Dot1" [ShaderNodeVectorMath] @(440, -2900) {
+    operation = "DOT_PRODUCT"
+    inputs {
+      (0: "Vector") -> "E1 D"(2: "Tangent"),
+      (1: "Vector") -> "E1 V1"(0: "Value"),
+    }
+  }
+
+  // the tangent at end 0 points into the panel, at end 1 out of it, so the
+  // mating direction is the smaller dot at end 0 and the larger at end 1
+
+  expr<float> "E0 Pick" @(680, -2400) {
+    expression = "greater_than(d0, d1)"
+    inputs {
+      "d0" -> "E0 Dot0"(1: "Value"),
+      "d1" -> "E0 Dot1"(1: "Value"),
+    }
+  }
+
+  expr<float> "E1 Pick" @(680, -2800) {
+    expression = "less_than(d0, d1)"
+    inputs {
+      "d0" -> "E1 Dot0"(1: "Value"),
+      "d1" -> "E1 Dot1"(1: "Value"),
+    }
+  }
+
+  node "E0 Other" [ShaderNodeMix] @(920, -2400) {
+    data_type = "VECTOR"
+    inputs {
+      (0: "Factor") -> "E0 Pick"(0: "Value"),
+      (4: "A") -> "E0 V0"(0: "Value"),
+      (5: "B") -> "E0 V1"(0: "Value"),
+    }
+  }
+
+  node "E1 Other" [ShaderNodeMix] @(920, -2800) {
+    data_type = "VECTOR"
+    inputs {
+      (0: "Factor") -> "E1 Pick"(0: "Value"),
+      (4: "A") -> "E1 V0"(0: "Value"),
+      (5: "B") -> "E1 V1"(0: "Value"),
+    }
+  }
+
+  expr<float> "Free 0" @(700, -1300) {
+    expression = "less_than(v, 1.5)"
+    inputs {
+      "v" -> "E0 Val"(0: "Value"),
+    }
+  }
+
+  expr<float> "Free 1" @(700, -1900) {
+    expression = "less_than(v, 1.5)"
+    inputs {
+      "v" -> "E1 Val"(0: "Value"),
+    }
+  }
+
+  expr<float> "Corner 0" @(700, -1400) {
+    expression = "compare(v, 2.0, 0.5)"
+    inputs {
+      "v" -> "E0 Val"(0: "Value"),
+    }
+  }
+
+  expr<float> "Corner 1" @(700, -2000) {
+    expression = "compare(v, 2.0, 0.5)"
+    inputs {
+      "v" -> "E1 Val"(0: "Value"),
+    }
+  }
+
+  expr<float> "Stem 0" @(700, -1500) {
+    expression = "greater_than(v, 2.5)"
+    inputs {
+      "v" -> "E0 Val"(0: "Value"),
+    }
+  }
+
+  expr<float> "Stem 1" @(700, -2100) {
+    expression = "greater_than(v, 2.5)"
+    inputs {
+      "v" -> "E1 Val"(0: "Value"),
+    }
+  }
+
+  expr<float> "Owns 0" @(940, -1400) {
+    expression = "c * (o + odd - 2.0 * o * odd)"
+    inputs {
+      "c" -> "Corner 0"(0: "Value"),
+      "o" -> "E0 Own"(0: "Value"),
+      "odd" -> "G Odd"(0: "Value"),
+    }
+  }
+
+  expr<float> "Owns 1" @(940, -2000) {
+    expression = "c * (o + odd - 2.0 * o * odd)"
+    inputs {
+      "c" -> "Corner 1"(0: "Value"),
+      "o" -> "E1 Own"(0: "Value"),
+      "odd" -> "G Odd"(0: "Value"),
+    }
+  }
+
+  expr<float> "Span A" @(1180, -1400) {
+    expression = "(c + s - 2.0 * own) * d"
+    inputs {
+      "c" -> "Corner 0"(0: "Value"),
+      "s" -> "Stem 0"(0: "Value"),
+      "own" -> "Owns 0"(0: "Value"),
+      "d" -> "E0 D"(0: "Value"),
+    }
+  }
+
+  expr<float> "Span B" @(1180, -2000) {
+    expression = "len - (c + s - 2.0 * own) * d"
+    inputs {
+      "len" -> "R Len"(0: "Value"),
+      "c" -> "Corner 1"(0: "Value"),
+      "s" -> "Stem 1"(0: "Value"),
+      "own" -> "Owns 1"(0: "Value"),
+      "d" -> "E1 D"(0: "Value"),
+    }
+  }
+
+  expr<float> "Span" @(1420, -1700) {
+    expression = "max(b - a, 0.0)"
+    inputs {
+      "a" -> "Span A"(0: "Value"),
+      "b" -> "Span B"(0: "Value"),
+    }
+  }
+
+  // the stretch both course parities agree on — a jumper may only live in
+  // here, or it would poke into the corner the course above has given away
+
+  expr<float> "Shared A" @(1180, -1600) {
+    expression = "d * (1.0 - f)"
+    inputs {
+      "d" -> "E0 D"(0: "Value"),
+      "f" -> "Free 0"(0: "Value"),
+    }
+  }
+
+  expr<float> "Shared B" @(1180, -2200) {
+    expression = "len - d * (1.0 - f)"
+    inputs {
+      "len" -> "R Len"(0: "Value"),
+      "d" -> "E1 D"(0: "Value"),
+      "f" -> "Free 1"(0: "Value"),
+    }
+  }
+
+  expr<float> "Head" @(1420, -1400) {
+    expression = "own * (d + q)"
+    inputs {
+      "own" -> "Owns 0"(0: "Value"),
+      "d" -> "E0 D"(0: "Value"),
+      "q" -> "Group Input"("Quoin Length"),
+    }
+  }
+
+  expr<float> "Tail" @(1420, -2000) {
+    expression = "own * (d + q)"
+    inputs {
+      "own" -> "Owns 1"(0: "Value"),
+      "d" -> "E1 D"(0: "Value"),
+      "q" -> "Group Input"("Quoin Length"),
+    }
+  }
+
+  // ---- E: blocks across the course ---------------------------------------
+
+  expr<float> "W Low" @(700, 400) {
+    expression = "0.75 * lo + 0.25 * hi"
+    inputs {
+      "lo" -> "Group Input"("Min Block Width"),
+      "hi" -> "Group Input"("Max Block Width"),
+    }
+  }
+
+  expr<float> "W High" @(700, 300) {
+    expression = "0.25 * lo + 0.75 * hi"
+    inputs {
+      "lo" -> "Group Input"("Min Block Width"),
+      "hi" -> "Group Input"("Max Block Width"),
+    }
+  }
+
+  node "W Mean" [GeometryNodeGroup] @(940, 360) {
+    node_tree = "mas Hash Range"
+    inputs {
+      ("X") -> "G Run"(0: "Value"),
+      ("Y") -> "G Course"(0: "Value"),
+      ("Z") = 777.0,
+      ("Channel") = 21.0,
+      ("Seed") -> "Group Input"("Seed"),
+      ("Min") -> "W Low"(0: "Value"),
+      ("Max") -> "W High"(0: "Value"),
+    }
+  }
+
+  node "W Piece" [GeometryNodeGroup] @(940, 160) {
+    node_tree = "mas Hash Range"
+    inputs {
+      ("X") -> "G Run"(0: "Value"),
+      ("Y") -> "G Course"(0: "Value"),
+      ("Z") -> "G Slot"(0: "Value"),
+      ("Channel") = 22.0,
+      ("Seed") -> "Group Input"("Seed"),
+      ("Min") -> "Group Input"("Min Block Width"),
+      ("Max") -> "Group Input"("Max Block Width"),
+    }
+  }
+
+  node "B Count" [GeometryNodeGroup] @(1660, 360) {
+    node_tree = "mas Slot Count"
+    inputs {
+      ("Span") -> "Span"(0: "Value"),
+      ("Mean") -> "W Mean"(0: "Value"),
+      ("Cap") = 48.0,
+      ("Head") -> "Head"(0: "Value"),
+      ("Tail") -> "Tail"(0: "Value"),
+    }
+  }
+
+  node "B Part" [GeometryNodeGroup] @(1900, 200) {
+    node_tree = "mas Span Partition"
+    inputs {
+      ("Span") -> "Span"(0: "Value"),
+      ("Slot") -> "G Slot"(0: "Value"),
+      ("Count") -> "B Count"(0: "Count"),
+      ("Group ID") -> "G Key Int"(0: "Integer"),
+      ("Piece") -> "W Piece"(0: "Value"),
+      ("Enabled") -> "S CAct"(0: "Value"),
+      ("Head") -> "Head"(0: "Value"),
+      ("Tail") -> "Tail"(0: "Value"),
+    }
+  }
+
+  expr<float> "U0" @(2140, 200) {
+    expression = "a + s"
+    inputs {
+      "a" -> "Span A"(0: "Value"),
+      "s" -> "B Part"(0: "Start"),
+    }
+  }
+
+  expr<float> "U1" @(2140, 80) {
+    expression = "a + e"
+    inputs {
+      "a" -> "Span A"(0: "Value"),
+      "e" -> "B Part"(1: "End"),
+    }
+  }
+
+  expr<float> "Quoin" @(2140, -40) {
+    expression = "min(1.0, hd + tl)"
+    inputs {
+      "hd" -> "B Part"(4: "Is Head"),
+      "tl" -> "B Part"(5: "Is Tail"),
+    }
+  }
+
+  // the first and last block of a course at a corner get their end face cut
+  // in the mating wall's face plane, owning or not, so the arris comes out
+  // clean at any angle
+
+  expr<float> "CF0" @(2140, -280) {
+    expression = "compare(slot, 0.0, 0.1) * c"
+    inputs {
+      "slot" -> "G Slot"(0: "Value"),
+      "c" -> "Corner 0"(0: "Value"),
+    }
+  }
+
+  expr<float> "CF1" @(2140, -400) {
+    expression = "compare(slot, n - 1.0, 0.1) * c"
+    inputs {
+      "slot" -> "G Slot"(0: "Value"),
+      "n" -> "B Count"(0: "Count"),
+      "c" -> "Corner 1"(0: "Value"),
+    }
+  }
+
+  // a stone is not laid where the shell has already stopped: the course stack
+  // is the whole wall's, but the height it is cut against is local
+
+  expr<float> "Mid U" @(2140, -160) {
+    expression = "min(max((u0 + u1) * 0.5, 0.0), len)"
+    inputs {
+      "u0" -> "U0"(0: "Value"),
+      "u1" -> "U1"(0: "Value"),
+      "len" -> "R Len"(0: "Value"),
+    }
+  }
+
+  node "Local H" [GeometryNodeSampleCurve] @(2380, -160) {
+    mode = "LENGTH"
+    inputs {
+      (0: "Curves") -> "Panels"(0: "Panels"),
+      (1: "Value") -> "P H"(0: "Attribute"),
+      (3: "Length") -> "Mid U"(0: "Value"),
+      (4: "Curve Index") -> "G Run Int"(0: "Integer"),
+    }
+  }
+
+  // The height a stone courses against is the shell face it stands on, not
+  // an interpolation between plan vertices — heights step at a segment
+  // boundary rather than ramping across the whole segment. Every face of a
+  // stack shares its plan centre (sides are vertical), so one point per
+  // face, dropped by a scaled copy of its column top, lets a nearest lookup
+  // from below pick the top of exactly the column the stone stands in.
+  // Faces are quads: the four corners are the whole face.
+
+  node "W Pos" [GeometryNodeInputPosition] @(2380, -2400) {
+  }
+
+  node "W XYZ" [ShaderNodeSeparateXYZ] @(2560, -2400) {
+    inputs {
+      (0: "Vector") -> "W Pos"(0: "Position"),
+    }
+  }
+
+  node "F Idx" [GeometryNodeInputIndex] @(2380, -2540) {
+  }
+
+  node "F C0" [GeometryNodeCornersOfFace] @(2560, -2540) {
+    inputs {
+      (0: "Face Index") -> "F Idx"(0: "Index"),
+      (2: "Sort Index") = 0,
+    }
+  }
+
+  node "F C1" [GeometryNodeCornersOfFace] @(2560, -2680) {
+    inputs {
+      (0: "Face Index") -> "F Idx"(0: "Index"),
+      (2: "Sort Index") = 1,
+    }
+  }
+
+  node "F C2" [GeometryNodeCornersOfFace] @(2560, -2820) {
+    inputs {
+      (0: "Face Index") -> "F Idx"(0: "Index"),
+      (2: "Sort Index") = 2,
+    }
+  }
+
+  node "F C3" [GeometryNodeCornersOfFace] @(2560, -2960) {
+    inputs {
+      (0: "Face Index") -> "F Idx"(0: "Index"),
+      (2: "Sort Index") = 3,
+    }
+  }
+
+  node "F V0" [GeometryNodeVertexOfCorner] @(2740, -2540) {
+    inputs {
+      (0: "Corner Index") -> "F C0"(0: "Corner Index"),
+    }
+  }
+
+  node "F V1" [GeometryNodeVertexOfCorner] @(2740, -2680) {
+    inputs {
+      (0: "Corner Index") -> "F C1"(0: "Corner Index"),
+    }
+  }
+
+  node "F V2" [GeometryNodeVertexOfCorner] @(2740, -2820) {
+    inputs {
+      (0: "Corner Index") -> "F C2"(0: "Corner Index"),
+    }
+  }
+
+  node "F V3" [GeometryNodeVertexOfCorner] @(2740, -2960) {
+    inputs {
+      (0: "Corner Index") -> "F C3"(0: "Corner Index"),
+    }
+  }
+
+  node "F Z0" [GeometryNodeSampleIndex] @(2920, -2540) {
+    inputs {
+      (0: "Geometry") -> "Group Input"("Geometry"),
+      (1: "Value") -> "W XYZ"(2: "Z"),
+      (2: "Index") -> "F V0"(0: "Vertex Index"),
+    }
+  }
+
+  node "F Z1" [GeometryNodeSampleIndex] @(2920, -2680) {
+    inputs {
+      (0: "Geometry") -> "Group Input"("Geometry"),
+      (1: "Value") -> "W XYZ"(2: "Z"),
+      (2: "Index") -> "F V1"(0: "Vertex Index"),
+    }
+  }
+
+  node "F Z2" [GeometryNodeSampleIndex] @(2920, -2820) {
+    inputs {
+      (0: "Geometry") -> "Group Input"("Geometry"),
+      (1: "Value") -> "W XYZ"(2: "Z"),
+      (2: "Index") -> "F V2"(0: "Vertex Index"),
+    }
+  }
+
+  node "F Z3" [GeometryNodeSampleIndex] @(2920, -2960) {
+    inputs {
+      (0: "Geometry") -> "Group Input"("Geometry"),
+      (1: "Value") -> "W XYZ"(2: "Z"),
+      (2: "Index") -> "F V3"(0: "Vertex Index"),
+    }
+  }
+
+  expr<float> "F Top" @(3100, -2740) {
+    expression = "max(max(z0, z1), max(z2, z3))"
+    inputs {
+      "z0" -> "F Z0"(0: "Value"),
+      "z1" -> "F Z1"(0: "Value"),
+      "z2" -> "F Z2"(0: "Value"),
+      "z3" -> "F Z3"(0: "Value"),
+    }
+  }
+
+  node "St FTop" [GeometryNodeStoreNamedAttribute] @(3280, -2540) {
+    domain = "FACE"
+    inputs {
+      (0: "Geometry") -> "Group Input"("Geometry"),
+      (2: "Name") = "mas_ftop",
+      (3: "Value") -> "F Top"(0: "Value"),
+    }
+  }
+
+  expr<float> "F Sink" @(3280, -2740) {
+    expression = "0.0 - 0.001 * ft"
+    inputs {
+      "ft" -> "F Top"(0: "Value"),
+    }
+  }
+
+  node "F Flat" [ShaderNodeCombineXYZ] @(3460, -2740) {
+    inputs {
+      (0: "X") -> "W XYZ"(0: "X"),
+      (1: "Y") -> "W XYZ"(1: "Y"),
+      (2: "Z") -> "F Sink"(0: "Value"),
+    }
+  }
+
+  node "F Pts" [GeometryNodeMeshToPoints] @(3460, -2540) {
+    mode = "FACES"
+    inputs {
+      (0: "Mesh") -> "St FTop"(0: "Geometry"),
+      (2: "Position") -> "F Flat"(0: "Vector"),
+    }
+  }
+
+  node "R FTop" [GeometryNodeInputNamedAttribute] @(3460, -2400) {
+    inputs {
+      (0: "Name") = "mas_ftop",
+    }
+  }
+
+  node "Probe P" [ShaderNodeCombineXYZ] @(2620, -300) {
+    inputs {
+      (0: "X") -> "Local H XYZ"(0: "X"),
+      (1: "Y") -> "Local H XYZ"(1: "Y"),
+      (2: "Z") = -1.0,
+    }
+  }
+
+  node "Local H XYZ" [ShaderNodeSeparateXYZ] @(2620, -160) {
+    inputs {
+      (0: "Vector") -> "Local H"(1: "Position"),
+    }
+  }
+
+  node "Seg Near" [GeometryNodeSampleNearest] @(2860, -300) {
+    inputs {
+      (0: "Geometry") -> "F Pts"(0: "Points"),
+      (1: "Sample Position") -> "Probe P"(0: "Vector"),
+    }
+  }
+
+  node "Seg Top" [GeometryNodeSampleIndex] @(3100, -300) {
+    inputs {
+      (0: "Geometry") -> "F Pts"(0: "Points"),
+      (1: "Value") -> "R FTop"(0: "Attribute"),
+      (2: "Index") -> "Seg Near"(0: "Index"),
+    }
+  }
+
+  expr<float> "Seg H" @(3340, -300) {
+    expression = "top - base"
+    inputs {
+      "top" -> "Seg Top"(0: "Value"),
+      "base" -> "Panels"(2: "Base"),
+    }
+  }
+
+  // a stone must fit under the shell at both its ends, not just its middle,
+  // or a block at a height step pokes past the boundary and floats
+
+  expr<float> "U0 C" @(2380, -440) {
+    expression = "min(max(u, 0.0), len)"
+    inputs {
+      "u" -> "U0"(0: "Value"),
+      "len" -> "R Len"(0: "Value"),
+    }
+  }
+
+  expr<float> "U1 C" @(2380, -560) {
+    expression = "min(max(u, 0.0), len)"
+    inputs {
+      "u" -> "U1"(0: "Value"),
+      "len" -> "R Len"(0: "Value"),
+    }
+  }
+
+  node "QP0" [GeometryNodeSampleCurve] @(2620, -440) {
+    mode = "LENGTH"
+    inputs {
+      (0: "Curves") -> "Panels"(0: "Panels"),
+      (3: "Length") -> "U0 C"(0: "Value"),
+      (4: "Curve Index") -> "G Run Int"(0: "Integer"),
+    }
+  }
+
+  node "QP1" [GeometryNodeSampleCurve] @(2620, -560) {
+    mode = "LENGTH"
+    inputs {
+      (0: "Curves") -> "Panels"(0: "Panels"),
+      (3: "Length") -> "U1 C"(0: "Value"),
+      (4: "Curve Index") -> "G Run Int"(0: "Integer"),
+    }
+  }
+
+  node "QP0 XYZ" [ShaderNodeSeparateXYZ] @(2860, -440) {
+    inputs {
+      (0: "Vector") -> "QP0"(1: "Position"),
+    }
+  }
+
+  node "QP1 XYZ" [ShaderNodeSeparateXYZ] @(2860, -560) {
+    inputs {
+      (0: "Vector") -> "QP1"(1: "Position"),
+    }
+  }
+
+  node "Probe P0" [ShaderNodeCombineXYZ] @(3100, -440) {
+    inputs {
+      (0: "X") -> "QP0 XYZ"(0: "X"),
+      (1: "Y") -> "QP0 XYZ"(1: "Y"),
+      (2: "Z") = -1.0,
+    }
+  }
+
+  node "Probe P1" [ShaderNodeCombineXYZ] @(3100, -560) {
+    inputs {
+      (0: "X") -> "QP1 XYZ"(0: "X"),
+      (1: "Y") -> "QP1 XYZ"(1: "Y"),
+      (2: "Z") = -1.0,
+    }
+  }
+
+  node "Seg N0" [GeometryNodeSampleNearest] @(3340, -440) {
+    inputs {
+      (0: "Geometry") -> "F Pts"(0: "Points"),
+      (1: "Sample Position") -> "Probe P0"(0: "Vector"),
+    }
+  }
+
+  node "Seg N1" [GeometryNodeSampleNearest] @(3340, -560) {
+    inputs {
+      (0: "Geometry") -> "F Pts"(0: "Points"),
+      (1: "Sample Position") -> "Probe P1"(0: "Vector"),
+    }
+  }
+
+  node "Seg T0" [GeometryNodeSampleIndex] @(3580, -440) {
+    inputs {
+      (0: "Geometry") -> "F Pts"(0: "Points"),
+      (1: "Value") -> "R FTop"(0: "Attribute"),
+      (2: "Index") -> "Seg N0"(0: "Index"),
+    }
+  }
+
+  node "Seg T1" [GeometryNodeSampleIndex] @(3580, -560) {
+    inputs {
+      (0: "Geometry") -> "F Pts"(0: "Points"),
+      (1: "Value") -> "R FTop"(0: "Attribute"),
+      (2: "Index") -> "Seg N1"(0: "Index"),
+    }
+  }
+
+  expr<float> "Seg HH" @(3820, -500) {
+    expression = "min(t0, t1) - base"
+    inputs {
+      "t0" -> "Seg T0"(0: "Value"),
+      "t1" -> "Seg T1"(0: "Value"),
+      "base" -> "Panels"(2: "Base"),
+    }
+  }
+
+  expr<float> "Fits" @(2620, -160) {
+    expression = "act * less_than(z + h, lh + 1e-4)"
+    inputs {
+      "act" -> "B Part"(3: "Active"),
+      "z" -> "S CZ0"(0: "Value"),
+      "h" -> "S CH"(0: "Value"),
+      "lh" -> "Seg HH"(0: "Value"),
+    }
+  }
+
+  expr<float> "Fits Up" @(2620, -300) {
+    expression = "act * less_than(z + h, lh + 1e-4)"
+    inputs {
+      "act" -> "S CAct Up"(0: "Value"),
+      "z" -> "S CZ0 Up"(0: "Value"),
+      "h" -> "S CH Up"(0: "Value"),
+      "lh" -> "Seg HH"(0: "Value"),
+    }
+  }
+
+  // ---- F: jumpers ---------------------------------------------------------
+
+  node "J Hash" [GeometryNodeGroup] @(1900, -600) {
+    node_tree = "mas Hash"
+    inputs {
+      ("X") -> "G Run"(0: "Value"),
+      ("Y") -> "G Course"(0: "Value"),
+      ("Z") -> "G Slot"(0: "Value"),
+      ("Channel") = 23.0,
+      ("Seed") -> "Group Input"("Seed"),
+    }
+  }
+
+  expr<float> "Slot Prev" @(1900, -780) {
+    expression = "j - 1.0"
+    inputs {
+      "j" -> "G Slot"(0: "Value"),
+    }
+  }
+
+  node "J Prev Hash" [GeometryNodeGroup] @(2140, -780) {
+    node_tree = "mas Hash"
+    inputs {
+      ("X") -> "G Run"(0: "Value"),
+      ("Y") -> "G Course"(0: "Value"),
+      ("Z") -> "Slot Prev"(0: "Value"),
+      ("Channel") = 23.0,
+      ("Seed") -> "Group Input"("Seed"),
+    }
+  }
+
+  expr<float> "J Wide" @(2140, -960) {
+    expression = "greater_than(w, 0.3 * lo + 0.7 * hi)"
+    inputs {
+      "w" -> "W Piece"(0: "Value"),
+      "lo" -> "Group Input"("Min Block Width"),
+      "hi" -> "Group Input"("Max Block Width"),
+    }
+  }
+
+  // a jumper lives in the stretch both course parities agree on, and stays a
+  // block clear of either end: a jumper that swallows the last stone of the
+  // course above leaves a notch where the panel should finish square
+
+  expr<float> "J Inside" @(2380, -960) {
+    expression = "greater_than(u0, sa + m) * less_than(u1, sb - m)"
+    inputs {
+      "u0" -> "U0"(0: "Value"),
+      "u1" -> "U1"(0: "Value"),
+      "sa" -> "Shared A"(0: "Value"),
+      "sb" -> "Shared B"(0: "Value"),
+      "m" -> "Group Input"("Max Block Width"),
+    }
+  }
+
+  expr<float> "Jumper" @(2860, -600) {
+    expression =
+      "fits * (1.0 - odd) * up * wide * inside * (1.0 - quoin)
+       * less_than(h, chance)
+       * (1.0 - less_than(hp, chance) * greater_than(j, 0.5))"
+    inputs {
+      "fits" -> "Fits"(0: "Value"),
+      "odd" -> "G Odd"(0: "Value"),
+      "up" -> "Fits Up"(0: "Value"),
+      "wide" -> "J Wide"(0: "Value"),
+      "inside" -> "J Inside"(0: "Value"),
+      "quoin" -> "Quoin"(0: "Value"),
+      "h" -> "J Hash"(0: "Value"),
+      "hp" -> "J Prev Hash"(0: "Value"),
+      "j" -> "G Slot"(0: "Value"),
+      "chance" -> "Group Input"("Jumper Chance"),
+    }
+  }
+
+  expr<float> "Z1" @(3100, -600) {
+    expression = "z + h + jump * (zu + hu - z - h)"
+    inputs {
+      "z" -> "S CZ0"(0: "Value"),
+      "h" -> "S CH"(0: "Value"),
+      "zu" -> "S CZ0 Up"(0: "Value"),
+      "hu" -> "S CH Up"(0: "Value"),
+      "jump" -> "Jumper"(0: "Value"),
+    }
+  }
+
+  // ---- G: write the layout onto the grid ---------------------------------
+
+  node "G St U0" [GeometryNodeStoreNamedAttribute] @(3340, 600) {
+    inputs {
+      (0: "Geometry") -> "Grid"(0: "Points"),
+      (2: "Name") = "mas_u0",
+      (3: "Value") -> "U0"(0: "Value"),
+    }
+  }
+
+  node "G St U1" [GeometryNodeStoreNamedAttribute] @(3540, 600) {
+    inputs {
+      (0: "Geometry") -> "G St U0"(0: "Geometry"),
+      (2: "Name") = "mas_u1",
+      (3: "Value") -> "U1"(0: "Value"),
+    }
+  }
+
+  node "G St Z0" [GeometryNodeStoreNamedAttribute] @(3740, 600) {
+    inputs {
+      (0: "Geometry") -> "G St U1"(0: "Geometry"),
+      (2: "Name") = "mas_z0",
+      (3: "Value") -> "S CZ0"(0: "Value"),
+    }
+  }
+
+  node "G St Z1" [GeometryNodeStoreNamedAttribute] @(3940, 600) {
+    inputs {
+      (0: "Geometry") -> "G St Z0"(0: "Geometry"),
+      (2: "Name") = "mas_z1",
+      (3: "Value") -> "Z1"(0: "Value"),
+    }
+  }
+
+  node "G St Act" [GeometryNodeStoreNamedAttribute] @(4140, 600) {
+    data_type = "BOOLEAN"
+    inputs {
+      (0: "Geometry") -> "G St Z1"(0: "Geometry"),
+      (2: "Name") = "mas_act",
+      (3: "Value") -> "Fits"(0: "Value"),
+    }
+  }
+
+  node "G St Jmp" [GeometryNodeStoreNamedAttribute] @(4340, 600) {
+    data_type = "BOOLEAN"
+    inputs {
+      (0: "Geometry") -> "G St Act"(0: "Geometry"),
+      (2: "Name") = "mas_jmp",
+      (3: "Value") -> "Jumper"(0: "Value"),
+    }
+  }
+
+  // the course a stone reaches the top of: its own, unless it is a jumper,
+  // which stands into the one above and holds up whatever beds on that
+
+  expr<float> "G Top" @(4340, 400) {
+    expression = "c + j"
+    inputs {
+      "c" -> "G Course"(0: "Value"),
+      "j" -> "Jumper"(0: "Value"),
+    }
+  }
+
+  node "G St Top" [GeometryNodeStoreNamedAttribute] @(4340, 750) {
+    inputs {
+      (0: "Geometry") -> "G St Jmp"(0: "Geometry"),
+      (2: "Name") = "mas_top",
+      (3: "Value") -> "G Top"(0: "Value"),
+    }
+  }
+
+  node "G St Odd" [GeometryNodeStoreNamedAttribute] @(4540, 600) {
+    data_type = "BOOLEAN"
+    inputs {
+      (0: "Geometry") -> "G St Top"(0: "Geometry"),
+      (2: "Name") = "mas_odd",
+      (3: "Value") -> "G Odd"(0: "Value"),
+    }
+  }
+
+  node "G St Key" [GeometryNodeStoreNamedAttribute] @(4740, 600) {
+    data_type = "INT"
+    inputs {
+      (0: "Geometry") -> "G St Odd"(0: "Geometry"),
+      (2: "Name") = "mas_key",
+      (3: "Value") -> "G Key Int"(0: "Integer"),
+    }
+  }
+
+  node "G St Crs" [GeometryNodeStoreNamedAttribute] @(4940, 600) {
+    inputs {
+      (0: "Geometry") -> "G St Key"(0: "Geometry"),
+      (2: "Name") = "mas_crs",
+      (3: "Value") -> "G Course"(0: "Value"),
+    }
+  }
+
+  node "G St Run" [GeometryNodeStoreNamedAttribute] @(5140, 600) {
+    data_type = "INT"
+    inputs {
+      (0: "Geometry") -> "G St Crs"(0: "Geometry"),
+      (2: "Name") = "mas_run",
+      (3: "Value") -> "G Run Int"(0: "Integer"),
+    }
+  }
+
+  node "G St Quoin" [GeometryNodeStoreNamedAttribute] @(5340, 600) {
+    data_type = "BOOLEAN"
+    inputs {
+      (0: "Geometry") -> "G St Run"(0: "Geometry"),
+      (2: "Name") = "mas_quoin",
+      (3: "Value") -> "Quoin"(0: "Value"),
+    }
+  }
+
+  node "G St Sid" [GeometryNodeStoreNamedAttribute] @(5540, 600) {
+    data_type = "INT"
+    inputs {
+      (0: "Geometry") -> "G St Quoin"(0: "Geometry"),
+      (2: "Name") = "mas_sid",
+      (3: "Value") -> "G Index"(0: "Index"),
+    }
+  }
+
+  node "G St Len" [GeometryNodeStoreNamedAttribute] @(5740, 600) {
+    inputs {
+      (0: "Geometry") -> "G St Sid"(0: "Geometry"),
+      (2: "Name") = "mas_len",
+      (3: "Value") -> "R Len"(0: "Value"),
+    }
+  }
+
+  node "G St F0" [GeometryNodeStoreNamedAttribute] @(5940, 600) {
+    inputs {
+      (0: "Geometry") -> "G St Len"(0: "Geometry"),
+      (2: "Name") = "mas_f0",
+      (3: "Value") -> "Free 0"(0: "Value"),
+    }
+  }
+
+  node "G St F1" [GeometryNodeStoreNamedAttribute] @(6140, 600) {
+    inputs {
+      (0: "Geometry") -> "G St F0"(0: "Geometry"),
+      (2: "Name") = "mas_f1",
+      (3: "Value") -> "Free 1"(0: "Value"),
+    }
+  }
+
+  node "G St LH" [GeometryNodeStoreNamedAttribute] @(6340, 600) {
+    inputs {
+      (0: "Geometry") -> "G St F1"(0: "Geometry"),
+      (2: "Name") = "mas_lh",
+      (3: "Value") -> "Seg H"(0: "Value"),
+    }
+  }
+
+  node "G St CF0" [GeometryNodeStoreNamedAttribute] @(6540, 600) {
+    inputs {
+      (0: "Geometry") -> "G St LH"(0: "Geometry"),
+      (2: "Name") = "mas_cf0",
+      (3: "Value") -> "CF0"(0: "Value"),
+    }
+  }
+
+  node "G St CF1" [GeometryNodeStoreNamedAttribute] @(6740, 600) {
+    inputs {
+      (0: "Geometry") -> "G St CF0"(0: "Geometry"),
+      (2: "Name") = "mas_cf1",
+      (3: "Value") -> "CF1"(0: "Value"),
+    }
+  }
+
+  node "G St OD0" [GeometryNodeStoreNamedAttribute] @(6940, 600) {
+    data_type = "FLOAT_VECTOR"
+    inputs {
+      (0: "Geometry") -> "G St CF1"(0: "Geometry"),
+      (2: "Name") = "mas_od0",
+      (3: "Value") -> "E0 Other"(1: "Result"),
+    }
+  }
+
+  node "G St OD1" [GeometryNodeStoreNamedAttribute] @(7140, 600) {
+    data_type = "FLOAT_VECTOR"
+    inputs {
+      (0: "Geometry") -> "G St OD0"(0: "Geometry"),
+      (2: "Name") = "mas_od1",
+      (3: "Value") -> "E1 Other"(1: "Result"),
+    }
+  }
+
+  // ---- H: the jumper cloud, then three clamp passes ----------------------
+
+  node "A U0" [GeometryNodeInputNamedAttribute] @(6340, 200) {
+    inputs {
+      (0: "Name") = "mas_u0",
+    }
+  }
+
+  node "A U1" [GeometryNodeInputNamedAttribute] @(6340, 80) {
+    inputs {
+      (0: "Name") = "mas_u1",
+    }
+  }
+
+  node "A Z0" [GeometryNodeInputNamedAttribute] @(6340, -40) {
+    inputs {
+      (0: "Name") = "mas_z0",
+    }
+  }
+
+  node "A Z1" [GeometryNodeInputNamedAttribute] @(6340, -160) {
+    inputs {
+      (0: "Name") = "mas_z1",
+    }
+  }
+
+  node "A Act" [GeometryNodeInputNamedAttribute] @(6340, -280) {
+    data_type = "BOOLEAN"
+    inputs {
+      (0: "Name") = "mas_act",
+    }
+  }
+
+  node "A Jmp" [GeometryNodeInputNamedAttribute] @(6340, -400) {
+    data_type = "BOOLEAN"
+    inputs {
+      (0: "Name") = "mas_jmp",
+    }
+  }
+
+  node "A Key" [GeometryNodeInputNamedAttribute] @(6340, -520) {
+    data_type = "INT"
+    inputs {
+      (0: "Name") = "mas_key",
+    }
+  }
+
+  node "A Quoin" [GeometryNodeInputNamedAttribute] @(6340, -640) {
+    data_type = "BOOLEAN"
+    inputs {
+      (0: "Name") = "mas_quoin",
+    }
+  }
+
+  node "A Sid" [GeometryNodeInputNamedAttribute] @(6340, -760) {
+    data_type = "INT"
+    inputs {
+      (0: "Name") = "mas_sid",
+    }
+  }
+
+  node "A Run" [GeometryNodeInputNamedAttribute] @(6340, -880) {
+    data_type = "INT"
+    inputs {
+      (0: "Name") = "mas_run",
+    }
+  }
+
+  node "A Len" [GeometryNodeInputNamedAttribute] @(6340, -1000) {
+    inputs {
+      (0: "Name") = "mas_len",
+    }
+  }
+
+  node "A F0" [GeometryNodeInputNamedAttribute] @(6340, -1120) {
+    inputs {
+      (0: "Name") = "mas_f0",
+    }
+  }
+
+  node "A F1" [GeometryNodeInputNamedAttribute] @(6340, -1240) {
+    inputs {
+      (0: "Name") = "mas_f1",
+    }
+  }
+
+  node "A LH" [GeometryNodeInputNamedAttribute] @(6340, -1360) {
+    inputs {
+      (0: "Name") = "mas_lh",
+    }
+  }
+
+  expr<float> "Not Jumper" @(6580, -400) {
+    expression = "1.0 - act * jmp"
+    inputs {
+      "act" -> "A Act"(0: "Attribute"),
+      "jmp" -> "A Jmp"(0: "Attribute"),
+    }
+  }
+
+  node "J Only" [GeometryNodeDeleteGeometry] @(6820, 400) {
+    inputs {
+      (0: "Geometry") -> "G St OD1"(0: "Geometry"),
+      (1: "Selection") -> "Not Jumper"(0: "Value"),
+    }
+  }
+
+  expr<float> "J Mid" @(6580, -200) {
+    expression = "(u0 + u1) * 0.5"
+    inputs {
+      "u0" -> "A U0"(0: "Attribute"),
+      "u1" -> "A U1"(0: "Attribute"),
+    }
+  }
+
+  expr<float> "J Row" @(6580, -520) {
+    expression = "k * 1000.0"
+    inputs {
+      "k" -> "A Key"(0: "Attribute"),
+    }
+  }
+
+  node "J At" [ShaderNodeCombineXYZ] @(6820, -300) {
+    inputs {
+      (0: "X") -> "J Mid"(0: "Value"),
+      (1: "Y") -> "J Row"(0: "Value"),
+    }
+  }
+
+  node "J Cloud" [GeometryNodeSetPosition] @(7060, 400) {
+    inputs {
+      (0: "Geometry") -> "J Only"(0: "Geometry"),
+      (2: "Position") -> "J At"(0: "Vector"),
+    }
+  }
+
+  expr<float> "Clamp Min" @(7060, 200) {
+    expression = "gap + 0.01"
+    inputs {
+      "gap" -> "Group Input"("Mortar Gap"),
+    }
+  }
+
+  node "Clamp 1" [GeometryNodeGroup] @(7300, 600) {
+    node_tree = "mas Jumper Clamp"
+    inputs {
+      ("Grid") -> "G St OD1"(0: "Geometry"),
+      ("Jumpers") -> "J Cloud"(0: "Geometry"),
+      ("Min Width") -> "Clamp Min"(0: "Value"),
+      ("Probe") = 0.5,
+    }
+  }
+
+  node "Clamp 2" [GeometryNodeGroup] @(7540, 600) {
+    node_tree = "mas Jumper Clamp"
+    inputs {
+      ("Grid") -> "Clamp 1"(0: "Grid"),
+      ("Jumpers") -> "J Cloud"(0: "Geometry"),
+      ("Min Width") -> "Clamp Min"(0: "Value"),
+      ("Probe") = 0.12,
+    }
+  }
+
+  node "Clamp 3" [GeometryNodeGroup] @(7780, 600) {
+    node_tree = "mas Jumper Clamp"
+    inputs {
+      ("Grid") -> "Clamp 2"(0: "Grid"),
+      ("Jumpers") -> "J Cloud"(0: "Geometry"),
+      ("Min Width") -> "Clamp Min"(0: "Value"),
+      ("Probe") = 0.88,
+    }
+  }
+
+  // ---- I: exposure, then losses that hold each other up ------------------
+  //
+  // Exposure is how close a stone is to a face the weather can get at: the
+  // top of the wall, or a free end where the shell simply stops. A stone in
+  // the middle of a panel three courses down is at 0 and never wears.
+
+  expr<float> "Top Gap" @(8020, -160) {
+    expression = "max(lh - z1, 0.0)"
+    inputs {
+      "lh" -> "A LH"(0: "Attribute"),
+      "z1" -> "A Z1"(0: "Attribute"),
+    }
+  }
+
+  expr<float> "End Gap" @(8020, -300) {
+    expression =
+      "min(u0 + (1.0 - f0) * 1000.0, len - u1 + (1.0 - f1) * 1000.0)"
+    inputs {
+      "u0" -> "A U0"(0: "Attribute"),
+      "u1" -> "A U1"(0: "Attribute"),
+      "len" -> "A Len"(0: "Attribute"),
+      "f0" -> "A F0"(0: "Attribute"),
+      "f1" -> "A F1"(0: "Attribute"),
+    }
+  }
+
+  expr<float> "Exposure" @(8260, -230) {
+    expression =
+      "min(1.0, max(0.0, max(1.0 - tg / max(wh, 1e-4),
+                             1.0 - eg / max(wr, 1e-4))))"
+    inputs {
+      "tg" -> "Top Gap"(0: "Value"),
+      "eg" -> "End Gap"(0: "Value"),
+      "wh" -> "Group Input"("Wear Height"),
+      "wr" -> "Group Input"("Wear Reach"),
+    }
+  }
+
+  node "M Hash" [GeometryNodeGroup] @(8020, -500) {
+    node_tree = "mas Hash"
+    inputs {
+      ("X") -> "A Sid"(0: "Attribute"),
+      ("Channel") = 24.0,
+      ("Seed") -> "Group Input"("Seed"),
+    }
+  }
+
+  // a quoin is exempt from the flat loss — a hole at a corner reads as a
+  // mistake — but not from exposure: a ruin loses its top corner too
+
+  expr<float> "Loss Chance" @(8500, -400) {
+    expression = "miss * (1.0 - q) + wear * x * x * (1.0 - 0.5 * q)"
+    inputs {
+      "miss" -> "Group Input"("Missing Chance"),
+      "wear" -> "Group Input"("Wear"),
+      "x" -> "Exposure"(0: "Value"),
+      "q" -> "A Quoin"(0: "Attribute"),
+    }
+  }
+
+  expr<float> "Lost 0" @(8740, -400) {
+    expression = "act * less_than(h, c)"
+    inputs {
+      "act" -> "A Act"(0: "Attribute"),
+      "h" -> "M Hash"(0: "Value"),
+      "c" -> "Loss Chance"(0: "Value"),
+    }
+  }
+
+  node "St P0" [GeometryNodeStoreNamedAttribute] @(7420, 600) {
+    data_type = "FLOAT_VECTOR"
+    inputs {
+      (0: "Geometry") -> "Clamp 3"(0: "Grid"),
+      (2: "Name") = "mas_p0",
+      (3: "Value") -> "P0"(0: "Vector"),
+    }
+  }
+
+  node "St P1" [GeometryNodeStoreNamedAttribute] @(7620, 600) {
+    data_type = "FLOAT_VECTOR"
+    inputs {
+      (0: "Geometry") -> "St P0"(0: "Geometry"),
+      (2: "Name") = "mas_p1",
+      (3: "Value") -> "P1"(0: "Vector"),
+    }
+  }
+
+  node "St Stk" [GeometryNodeStoreNamedAttribute] @(7820, 600) {
+    inputs {
+      (0: "Geometry") -> "St P1"(0: "Geometry"),
+      (2: "Name") = "mas_stk",
+      (3: "Value") -> "SC0"(0: "Value"),
+    }
+  }
+
+  node "St Exp" [GeometryNodeStoreNamedAttribute] @(8020, 600) {
+    inputs {
+      (0: "Geometry") -> "St Stk"(0: "Geometry"),
+      (2: "Name") = "mas_exp",
+      (3: "Value") -> "Exposure"(0: "Value"),
+    }
+  }
+
+  node "St Lost" [GeometryNodeStoreNamedAttribute] @(8980, 600) {
+    inputs {
+      (0: "Geometry") -> "St Exp"(0: "Geometry"),
+      (2: "Name") = "mas_lost",
+      (3: "Value") -> "Lost 0"(0: "Value"),
+    }
+  }
+
+  node "Settle Count" [FunctionNodeFloatToInt] @(8980, 400) {
+    inputs {
+      (0: "Float") -> "K Count"(0: "Count"),
+    }
+  }
+
+  repeat "Settle" @(9220, 600) {
+    iterations -> "Settle Count"(0: "Integer")
+    items {
+      "Geometry": [NodeSocketGeometry] -> "St Lost"(0: "Geometry"),
+    }
+
+    node "Step" [GeometryNodeGroup] @(0, 0) {
+      node_tree = "mas Loss Step"
+      inputs {
+        ("Grid") -> "repeat"(0: "Geometry"),
+      }
+    }
+
+    outputs {
+      "Geometry" -> "Step"(0: "Grid"),
+    }
+  }
+
+  node "A Lost" [GeometryNodeInputNamedAttribute] @(9700, 200) {
+    inputs {
+      (0: "Name") = "mas_lost",
+    }
+  }
+
+  node "A Exp" [GeometryNodeInputNamedAttribute] @(9700, 80) {
+    inputs {
+      (0: "Name") = "mas_exp",
+    }
+  }
+
+  expr<float> "Drop" @(9940, 200) {
+    expression = "1.0 - act * (1.0 - lost)"
+    inputs {
+      "act" -> "A Act"(0: "Attribute"),
+      "lost" -> "A Lost"(0: "Attribute"),
+    }
+  }
+
+  node "Stones" [GeometryNodeDeleteGeometry] @(10180, 600) {
+    inputs {
+      (0: "Geometry") -> "Settle"(0: "Geometry"),
+      (1: "Selection") -> "Drop"(0: "Value"),
+    }
+  }
+
+  // ---- J: every surviving slot becomes a solid stone ---------------------
+  //
+  // A block is a straight solid laid on the chord between its two ends of the
+  // panel, so a curved panel comes out as a chorded run of stones — which is
+  // how curved masonry is actually laid. Sampling past the end of the spline
+  // is what a quoin needs, so the sample is clamped and then walked out along
+  // the end tangent.
+
+  expr<float> "S0 Clamp" @(10180, 200) {
+    expression = "min(max(u, 0.0), len)"
+    inputs {
+      "u" -> "A U0"(0: "Attribute"),
+      "len" -> "A Len"(0: "Attribute"),
+    }
+  }
+
+  expr<float> "S1 Clamp" @(10180, 80) {
+    expression = "min(max(u, 0.0), len)"
+    inputs {
+      "u" -> "A U1"(0: "Attribute"),
+      "len" -> "A Len"(0: "Attribute"),
+    }
+  }
+
+  node "SC0" [GeometryNodeSampleCurve] @(10420, 200) {
+    mode = "LENGTH"
+    inputs {
+      (0: "Curves") -> "Panels"(0: "Panels"),
+      (1: "Value") -> "P Thk"(0: "Attribute"),
+      (3: "Length") -> "S0 Clamp"(0: "Value"),
+      (4: "Curve Index") -> "A Run"(0: "Attribute"),
+    }
+  }
+
+  node "SC1" [GeometryNodeSampleCurve] @(10420, -100) {
+    mode = "LENGTH"
+    inputs {
+      (0: "Curves") -> "Panels"(0: "Panels"),
+      (1: "Value") -> "P Thk"(0: "Attribute"),
+      (3: "Length") -> "S1 Clamp"(0: "Value"),
+      (4: "Curve Index") -> "A Run"(0: "Attribute"),
+    }
+  }
+
+  expr<float> "S0 Over" @(10660, 340) {
+    expression = "u - c"
+    inputs {
+      "u" -> "A U0"(0: "Attribute"),
+      "c" -> "S0 Clamp"(0: "Value"),
+    }
+  }
+
+  expr<float> "S1 Over" @(10660, 240) {
+    expression = "u - c"
+    inputs {
+      "u" -> "A U1"(0: "Attribute"),
+      "c" -> "S1 Clamp"(0: "Value"),
+    }
+  }
+
+  node "T0" [ShaderNodeVectorMath] @(10900, 340) {
+    operation = "SCALE"
+    inputs {
+      (0: "Vector") -> "SC0"(2: "Tangent"),
+      (3: "Scale") -> "S0 Over"(0: "Value"),
+    }
+  }
+
+  node "T1" [ShaderNodeVectorMath] @(10900, 240) {
+    operation = "SCALE"
+    inputs {
+      (0: "Vector") -> "SC1"(2: "Tangent"),
+      (3: "Scale") -> "S1 Over"(0: "Value"),
+    }
+  }
+
+  node "P0" [ShaderNodeVectorMath] @(11140, 340) {
+    inputs {
+      (0: "Vector") -> "SC0"(1: "Position"),
+      (1: "Vector") -> "T0"(0: "Vector"),
+    }
+  }
+
+  node "P1" [ShaderNodeVectorMath] @(11140, 240) {
+    inputs {
+      (0: "Vector") -> "SC1"(1: "Position"),
+      (1: "Vector") -> "T1"(0: "Vector"),
+    }
+  }
+
+  node "A P0" [GeometryNodeInputNamedAttribute] @(11140, 60) {
+    data_type = "FLOAT_VECTOR"
+    inputs {
+      (0: "Name") = "mas_p0",
+    }
+  }
+
+  node "A P1" [GeometryNodeInputNamedAttribute] @(11140, -60) {
+    data_type = "FLOAT_VECTOR"
+    inputs {
+      (0: "Name") = "mas_p1",
+    }
+  }
+
+  node "A Stk" [GeometryNodeInputNamedAttribute] @(11140, -180) {
+    inputs {
+      (0: "Name") = "mas_stk",
+    }
+  }
+
+  node "Chord" [ShaderNodeVectorMath] @(11380, 340) {
+    operation = "SUBTRACT"
+    inputs {
+      (0: "Vector") -> "A P1"(0: "Attribute"),
+      (1: "Vector") -> "A P0"(0: "Attribute"),
+    }
+  }
+
+  // A stone is straight and the panel is not, so where two stones meet the
+  // joint is cut radial: each end face turns from "square to the chord" to
+  // "square to the curve at the joint", and the two faces meet in one plane
+  // with the mortar gap between them, inside and outside face alike. At a
+  // corner the first and last stone turn their end face further, into the
+  // mating wall's face plane, which is what makes the arris clean at any
+  // angle — the squint quoin. Both are the same operation on the solid: a
+  // plan-angle cut about the face's own centre, and the two cuts land on the
+  // same plane from either side, so neither leaves a wedge.
+
+  node "Chord Dir" [ShaderNodeVectorMath] @(11620, 620) {
+    operation = "NORMALIZE"
+    inputs {
+      (0: "Vector") -> "Chord"(0: "Vector"),
+    }
+  }
+
+  node "T0 XYZ" [ShaderNodeSeparateXYZ] @(11620, 760) {
+    inputs {
+      (0: "Vector") -> "SC0"(2: "Tangent"),
+    }
+  }
+
+  node "T1 XYZ" [ShaderNodeSeparateXYZ] @(11620, 900) {
+    inputs {
+      (0: "Vector") -> "SC1"(2: "Tangent"),
+    }
+  }
+
+  node "A CF0" [GeometryNodeInputNamedAttribute] @(11620, 1040) {
+    inputs {
+      (0: "Name") = "mas_cf0",
+    }
+  }
+
+  node "A CF1" [GeometryNodeInputNamedAttribute] @(11620, 1160) {
+    inputs {
+      (0: "Name") = "mas_cf1",
+    }
+  }
+
+  node "A OD0" [GeometryNodeInputNamedAttribute] @(11620, 1280) {
+    data_type = "FLOAT_VECTOR"
+    inputs {
+      (0: "Name") = "mas_od0",
+    }
+  }
+
+  node "A OD1" [GeometryNodeInputNamedAttribute] @(11620, 1400) {
+    data_type = "FLOAT_VECTOR"
+    inputs {
+      (0: "Name") = "mas_od1",
+    }
+  }
+
+  node "OD0 XYZ" [ShaderNodeSeparateXYZ] @(11860, 1280) {
+    inputs {
+      (0: "Vector") -> "A OD0"(0: "Attribute"),
+    }
+  }
+
+  node "OD1 XYZ" [ShaderNodeSeparateXYZ] @(11860, 1400) {
+    inputs {
+      (0: "Vector") -> "A OD1"(0: "Attribute"),
+    }
+  }
+
+  node "Chord XYZ" [ShaderNodeSeparateXYZ] @(11620, 340) {
+    inputs {
+      (0: "Vector") -> "Chord"(0: "Vector"),
+    }
+  }
+
+  // radial: the signed plan angle from the chord to the joint tangent
+
+  expr<float> "R0" @(11860, 760) {
+    expression =
+      "min(max(atan2(cx * ty - cy * tx, cx * tx + cy * ty), 0.0 - 0.6), 0.6)"
+    inputs {
+      "cx" -> "Chord XYZ"(0: "X"),
+      "cy" -> "Chord XYZ"(1: "Y"),
+      "tx" -> "T0 XYZ"(0: "X"),
+      "ty" -> "T0 XYZ"(1: "Y"),
+    }
+  }
+
+  expr<float> "R1" @(11860, 900) {
+    expression =
+      "min(max(atan2(cx * ty - cy * tx, cx * tx + cy * ty), 0.0 - 0.6), 0.6)"
+    inputs {
+      "cx" -> "Chord XYZ"(0: "X"),
+      "cy" -> "Chord XYZ"(1: "Y"),
+      "tx" -> "T1 XYZ"(0: "X"),
+      "ty" -> "T1 XYZ"(1: "Y"),
+    }
+  }
+
+  // squint: turn the end face parallel to the mating wall's direction
+
+  expr<float> "Ang0" @(12100, 1280) {
+    expression = "atan2(cx * oy - cy * ox, cx * ox + cy * oy)"
+    inputs {
+      "cx" -> "Chord XYZ"(0: "X"),
+      "cy" -> "Chord XYZ"(1: "Y"),
+      "ox" -> "OD0 XYZ"(0: "X"),
+      "oy" -> "OD0 XYZ"(1: "Y"),
+    }
+  }
+
+  expr<float> "Ang1" @(12100, 1400) {
+    expression = "atan2(cx * oy - cy * ox, cx * ox + cy * oy)"
+    inputs {
+      "cx" -> "Chord XYZ"(0: "X"),
+      "cy" -> "Chord XYZ"(1: "Y"),
+      "ox" -> "OD1 XYZ"(0: "X"),
+      "oy" -> "OD1 XYZ"(1: "Y"),
+    }
+  }
+
+  expr<float> "Ct0" @(12340, 1280) {
+    expression = "a - 0.5 * pi * sign(a)"
+    inputs {
+      "a" -> "Ang0"(0: "Value"),
+    }
+  }
+
+  expr<float> "Ct1" @(12340, 1400) {
+    expression = "a - 0.5 * pi * sign(a)"
+    inputs {
+      "a" -> "Ang1"(0: "Value"),
+    }
+  }
+
+  expr<float> "Tail Cut" @(12580, 1280) {
+    expression = "cf * ct + (1.0 - cf) * r"
+    inputs {
+      "cf" -> "A CF0"(0: "Attribute"),
+      "ct" -> "Ct0"(0: "Value"),
+      "r" -> "R0"(0: "Value"),
+    }
+  }
+
+  expr<float> "Head Cut" @(12580, 1400) {
+    expression = "cf * ct + (1.0 - cf) * r"
+    inputs {
+      "cf" -> "A CF1"(0: "Attribute"),
+      "ct" -> "Ct1"(0: "Value"),
+      "r" -> "R1"(0: "Value"),
+    }
+  }
+
+  node "Chord Len" [ShaderNodeVectorMath] @(11620, 460) {
+    operation = "LENGTH"
+    inputs {
+      (0: "Vector") -> "Chord"(0: "Vector"),
+    }
+  }
+
+  node "Mid P" [ShaderNodeVectorMath] @(11380, 140) {
+    operation = "ADD"
+    inputs {
+      (0: "Vector") -> "A P0"(0: "Attribute"),
+      (1: "Vector") -> "A P1"(0: "Attribute"),
+    }
+  }
+
+  node "Mid H" [ShaderNodeVectorMath] @(11620, 140) {
+    operation = "SCALE"
+    inputs {
+      (0: "Vector") -> "Mid P"(0: "Vector"),
+      (3: "Scale") = 0.5,
+    }
+  }
+
+  node "Mid XYZ" [ShaderNodeSeparateXYZ] @(11860, 140) {
+    inputs {
+      (0: "Vector") -> "Mid H"(0: "Vector"),
+    }
+  }
+
+  expr<float> "Stone Z" @(11860, -20) {
+    expression = "base + (z0 + z1) * 0.5 - 0.5 * bite"
+    inputs {
+      "base" -> "Panels"(2: "Base"),
+      "z0" -> "A Z0"(0: "Attribute"),
+      "z1" -> "A Z1"(0: "Attribute"),
+      "bite" -> "Bite"(0: "Value"),
+    }
+  }
+
+  node "Stone Centre" [ShaderNodeCombineXYZ] @(12100, 140) {
+    inputs {
+      (0: "X") -> "Mid XYZ"(0: "X"),
+      (1: "Y") -> "Mid XYZ"(1: "Y"),
+      (2: "Z") -> "Stone Z"(0: "Value"),
+    }
+  }
+
+  // exposure is geometry and is always there; Wear is how much of it the
+  // wall has actually suffered, so at Wear 0 nothing below is felt at all
+
+  expr<float> "Worn" @(11380, -200) {
+    expression = "min(1.0, w) * x"
+    inputs {
+      "w" -> "Group Input"("Wear"),
+      "x" -> "A Exp"(0: "Attribute"),
+    }
+  }
+
+  // Wear Bite is erosion, and erosion works on the weather: the two wall
+  // faces recede, the top of the stone is eaten down, and the bed stays
+  // seated on its course while the joints keep their gap — a stone shrunk
+  // about its centroid instead just reads as bad mortar all round.
+
+  expr<float> "Bite" @(11620, -200) {
+    expression = "b * x"
+    inputs {
+      "b" -> "Group Input"("Wear Bite"),
+      "x" -> "Worn"(0: "Value"),
+    }
+  }
+
+  expr<float> "Half W" @(11860, -200) {
+    expression = "max(0.5 * (l - gap), 0.01)"
+    inputs {
+      "l" -> "Chord Len"(1: "Value"),
+      "gap" -> "Group Input"("Mortar Gap"),
+    }
+  }
+
+  expr<float> "Half H" @(11860, -320) {
+    expression = "max(0.5 * (z1 - z0 - gap) - 0.5 * bite, 0.01)"
+    inputs {
+      "z0" -> "A Z0"(0: "Attribute"),
+      "z1" -> "A Z1"(0: "Attribute"),
+      "gap" -> "Group Input"("Mortar Gap"),
+      "bite" -> "Bite"(0: "Value"),
+    }
+  }
+
+  expr<float> "Half T" @(11860, -440) {
+    expression = "max(0.5 * t - bite, 0.01)"
+    inputs {
+      "t" -> "A Stk"(0: "Attribute"),
+      "bite" -> "Bite"(0: "Value"),
+    }
+  }
+
+  node "Stone Extents" [ShaderNodeCombineXYZ] @(12100, -300) {
+    inputs {
+      (0: "X") -> "Half W"(0: "Value"),
+      (1: "Y") -> "Half T"(0: "Value"),
+      (2: "Z") -> "Half H"(0: "Value"),
+    }
+  }
+
+  expr<float> "Yaw" @(11860, -560) {
+    expression = "atan2(dy, dx)"
+    inputs {
+      "dx" -> "Chord XYZ"(0: "X"),
+      "dy" -> "Chord XYZ"(1: "Y"),
+    }
+  }
+
+  node "Stone Rot" [FunctionNodeAxisAngleToRotation] @(12100, -560) {
+    inputs {
+      (1: "Angle") -> "Yaw"(0: "Value"),
+    }
+  }
+
+  // a quoin is a dressed stone: it chips less and sits truer than the field,
+  // which is what keeps the arris reading as one edge
+
+  expr<float> "Wear Chip" @(12100, -700) {
+    expression = "(c + (1.0 - c) * 0.6 * x) * (1.0 - 0.7 * q)"
+    inputs {
+      "c" -> "Group Input"("Chip Chance"),
+      "x" -> "Worn"(0: "Value"),
+      "q" -> "A Quoin"(0: "Attribute"),
+    }
+  }
+
+  expr<float> "Wear Depth" @(12100, -820) {
+    expression = "d * (1.0 + 2.0 * x)"
+    inputs {
+      "d" -> "Group Input"("Chip Depth"),
+      "x" -> "Worn"(0: "Value"),
+    }
+  }
+
+  expr<float> "Dress Irr" @(12100, -940) {
+    expression = "irr * (1.0 - 0.7 * q)"
+    inputs {
+      "irr" -> "Group Input"("Irregularity"),
+      "q" -> "A Quoin"(0: "Attribute"),
+    }
+  }
+
+  node "Solids" [GeometryNodeGroup] @(12420, 600) {
+    node_tree = "mas Stone Solid"
+    inputs {
+      ("Points") -> "Stones"(0: "Geometry"),
+      ("Centre") -> "Stone Centre"(0: "Vector"),
+      ("Half Extents") -> "Stone Extents"(0: "Vector"),
+      ("Rotation") -> "Stone Rot"(0: "Rotation"),
+      ("Head Cut") -> "Head Cut"(0: "Value"),
+      ("Tail Cut") -> "Tail Cut"(0: "Value"),
+      ("ID") -> "A Sid"(0: "Attribute"),
+      ("Edge Rounding") -> "Group Input"("Edge Rounding"),
+      ("Chip Chance") -> "Wear Chip"(0: "Value"),
+      ("Chip Depth") -> "Wear Depth"(0: "Value"),
+      ("Irregularity") -> "Dress Irr"(0: "Value"),
+      ("Segments") = 4,
+      ("Seed") -> "Group Input"("Seed"),
+    }
+  }
+
+  node "Group Output" [NodeGroupOutput] @(12700, 600) {
+    inputs {
+      ("Geometry") -> "Solids"(0: "Geometry"),
+    }
+  }
+}

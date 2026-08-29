@@ -1,0 +1,612 @@
+import core
+
+// stone.nodes — turn a cloud of stone slots into weathered solid stones.
+//
+// A stone slot is a point plus three fields: the stone's centre, its half
+// extents along its own axes, and its rotation. Every masonry tool ends by
+// describing its stones that way and handing them here, so blocks in a wall,
+// voussoirs in an arch and corbels under a parapet all weather identically and
+// only have to agree on where their stones sit.
+//
+// The three shaping passes (metric edge rounding, one chipped corner, mild
+// noise) move vertices only and never add or remove any, so a stone that
+// arrived as a closed box leaves as a closed 2-manifold solid. Rounding and
+// chipping run in the stone's own frame, so they hold at any rotation.
+//
+// Half extents are half sizes: a stone 0.6 long, 0.4 thick and 0.25 high has
+// Half Extents (0.3, 0.2, 0.125). Local X is the stone's length, Y its depth
+// into the wall, Z its height; Rotation carries that frame into the world.
+//
+// Head Cut and Tail Cut turn the two end faces (+X, -X) in plan, in radians,
+// positive counter-clockwise seen from +Z. Each face rotates about the
+// vertical line through its own centre, so the cut plane of one stone and the
+// cut plane of its neighbour meet on the joint line: a radial joint on a
+// curve, or a squint quoin end, is the two stones cut to the same plane.
+//
+// Hash channels 30-35 belong to this module.
+
+tree "mas Stone Solid" [GeometryNodeTree] {
+  interface {
+    inputs {
+      "Points": [NodeSocketGeometry],
+      "Centre": [NodeSocketVector],
+      "Half Extents": [NodeSocketVector],
+      "Rotation": [NodeSocketRotation],
+      "Head Cut": [NodeSocketFloat] = 0.0,
+      "Tail Cut": [NodeSocketFloat] = 0.0,
+      "ID": [NodeSocketInt] = 0,
+      "Edge Rounding": [NodeSocketFloat] = 0.02,
+      "Chip Chance": [NodeSocketFloat] = 0.2,
+      "Chip Depth": [NodeSocketFloat] = 0.05,
+      "Irregularity": [NodeSocketFloat] = 0.006,
+      "Segments": [NodeSocketInt] = 4,
+      "Seed": [NodeSocketFloat] = 0.0,
+    }
+    outputs {
+      "Geometry": [NodeSocketGeometry],
+    }
+  }
+
+  node "Group Input" [NodeGroupInput] @(-1400, 0) {
+  }
+
+  // ---- carry the stone frame onto the points, then build the boxes ------
+
+  node "St C" [GeometryNodeStoreNamedAttribute] @(-1140, 240) {
+    data_type = "FLOAT_VECTOR"
+    inputs {
+      (0: "Geometry") -> "Group Input"("Points"),
+      (2: "Name") = "mas_c",
+      (3: "Value") -> "Group Input"("Centre"),
+    }
+  }
+
+  node "St E" [GeometryNodeStoreNamedAttribute] @(-940, 240) {
+    data_type = "FLOAT_VECTOR"
+    inputs {
+      (0: "Geometry") -> "St C"(0: "Geometry"),
+      (2: "Name") = "mas_e",
+      (3: "Value") -> "Group Input"("Half Extents"),
+    }
+  }
+
+  node "St R" [GeometryNodeStoreNamedAttribute] @(-740, 240) {
+    data_type = "QUATERNION"
+    inputs {
+      (0: "Geometry") -> "St E"(0: "Geometry"),
+      (2: "Name") = "mas_r",
+      (3: "Value") -> "Group Input"("Rotation"),
+    }
+  }
+
+  node "St ID" [GeometryNodeStoreNamedAttribute] @(-540, 240) {
+    data_type = "INT"
+    inputs {
+      (0: "Geometry") -> "St R"(0: "Geometry"),
+      (2: "Name") = "mas_id",
+      (3: "Value") -> "Group Input"("ID"),
+    }
+  }
+
+  node "St CutH" [GeometryNodeStoreNamedAttribute] @(-540, 60) {
+    inputs {
+      (0: "Geometry") -> "St ID"(0: "Geometry"),
+      (2: "Name") = "mas_ch",
+      (3: "Value") -> "Group Input"("Head Cut"),
+    }
+  }
+
+  node "St CutT" [GeometryNodeStoreNamedAttribute] @(-540, -120) {
+    inputs {
+      (0: "Geometry") -> "St CutH"(0: "Geometry"),
+      (2: "Name") = "mas_ct",
+      (3: "Value") -> "Group Input"("Tail Cut"),
+    }
+  }
+
+  node "At Centre" [GeometryNodeSetPosition] @(-340, 240) {
+    inputs {
+      (0: "Geometry") -> "St CutT"(0: "Geometry"),
+      (2: "Position") -> "Group Input"("Centre"),
+    }
+  }
+
+  node "Box" [GeometryNodeMeshCube] @(-340, 20) {
+    inputs {
+      (1: "Vertices X") -> "Group Input"("Segments"),
+      (2: "Vertices Y") -> "Group Input"("Segments"),
+      (3: "Vertices Z") -> "Group Input"("Segments"),
+    }
+  }
+
+  node "Full Size" [ShaderNodeVectorMath] @(-340, -160) {
+    operation = "SCALE"
+    inputs {
+      (0: "Vector") -> "Group Input"("Half Extents"),
+      (3: "Scale") = 2.0,
+    }
+  }
+
+  node "Inst" [GeometryNodeInstanceOnPoints] @(-80, 120) {
+    inputs {
+      (0: "Points") -> "At Centre"(0: "Geometry"),
+      (2: "Instance") -> "Box"(0: "Mesh"),
+      (5: "Rotation") -> "Group Input"("Rotation"),
+      (6: "Scale") -> "Full Size"(0: "Vector"),
+    }
+  }
+
+  node "Real" [GeometryNodeRealizeInstances] @(140, 120) {
+    inputs {
+      (0: "Geometry") -> "Inst"(0: "Instances"),
+    }
+  }
+
+  // ---- read the frame back per vertex, work in stone-local space --------
+
+  node "Pos" [GeometryNodeInputPosition] @(140, -700) {
+  }
+
+  node "Read C" [GeometryNodeInputNamedAttribute] @(140, -260) {
+    data_type = "FLOAT_VECTOR"
+    inputs {
+      (0: "Name") = "mas_c",
+    }
+  }
+
+  node "Read E" [GeometryNodeInputNamedAttribute] @(140, -400) {
+    data_type = "FLOAT_VECTOR"
+    inputs {
+      (0: "Name") = "mas_e",
+    }
+  }
+
+  node "Read R" [GeometryNodeInputNamedAttribute] @(140, -540) {
+    data_type = "QUATERNION"
+    inputs {
+      (0: "Name") = "mas_r",
+    }
+  }
+
+  node "Read ID" [GeometryNodeInputNamedAttribute] @(140, -860) {
+    data_type = "INT"
+    inputs {
+      (0: "Name") = "mas_id",
+    }
+  }
+
+  node "Inv R" [FunctionNodeInvertRotation] @(380, -540) {
+    inputs {
+      (0: "Rotation") -> "Read R"(0: "Attribute"),
+    }
+  }
+
+  node "P Rel" [ShaderNodeVectorMath] @(380, -700) {
+    operation = "SUBTRACT"
+    inputs {
+      (0: "Vector") -> "Pos"(0: "Position"),
+      (1: "Vector") -> "Read C"(0: "Attribute"),
+    }
+  }
+
+  node "P Local" [FunctionNodeRotateVector] @(620, -760) {
+    inputs {
+      (0: "Vector") -> "P Rel"(0: "Vector"),
+      (1: "Rotation") -> "Inv R"(0: "Rotation"),
+    }
+  }
+
+  // ---- pass 1: metric edge rounding -------------------------------------
+
+  node "E XYZ" [ShaderNodeSeparateXYZ] @(380, -400) {
+    inputs {
+      (0: "Vector") -> "Read E"(0: "Attribute"),
+    }
+  }
+
+  expr<float> "E Min" @(620, -360) {
+    expression = "min(ex, min(ey, ez))"
+    inputs {
+      "ex" -> "E XYZ"(0: "X"),
+      "ey" -> "E XYZ"(1: "Y"),
+      "ez" -> "E XYZ"(2: "Z"),
+    }
+  }
+
+  expr<float> "Radius" @(860, -300) {
+    expression = "min(r, 0.6 * emin)"
+    inputs {
+      "r" -> "Group Input"("Edge Rounding"),
+      "emin" -> "E Min"(0: "Value"),
+    }
+  }
+
+  node "R Vec" [ShaderNodeCombineXYZ] @(1100, -300) {
+    inputs {
+      (0: "X") -> "Radius"(0: "Value"),
+      (1: "Y") -> "Radius"(0: "Value"),
+      (2: "Z") -> "Radius"(0: "Value"),
+    }
+  }
+
+  node "Inner" [ShaderNodeVectorMath] @(1340, -300) {
+    operation = "SUBTRACT"
+    inputs {
+      (0: "Vector") -> "Read E"(0: "Attribute"),
+      (1: "Vector") -> "R Vec"(0: "Vector"),
+    }
+  }
+
+  node "Inner Neg" [ShaderNodeVectorMath] @(1340, -440) {
+    operation = "SCALE"
+    inputs {
+      (0: "Vector") -> "Inner"(0: "Vector"),
+      (3: "Scale") = -1.0,
+    }
+  }
+
+  node "Q Lo" [ShaderNodeVectorMath] @(1580, -520) {
+    operation = "MAXIMUM"
+    inputs {
+      (0: "Vector") -> "P Local"(0: "Vector"),
+      (1: "Vector") -> "Inner Neg"(0: "Vector"),
+    }
+  }
+
+  node "Q" [ShaderNodeVectorMath] @(1580, -660) {
+    operation = "MINIMUM"
+    inputs {
+      (0: "Vector") -> "Q Lo"(0: "Vector"),
+      (1: "Vector") -> "Inner"(0: "Vector"),
+    }
+  }
+
+  node "Out D" [ShaderNodeVectorMath] @(1820, -660) {
+    operation = "SUBTRACT"
+    inputs {
+      (0: "Vector") -> "P Local"(0: "Vector"),
+      (1: "Vector") -> "Q"(0: "Vector"),
+    }
+  }
+
+  node "Out N" [ShaderNodeVectorMath] @(2060, -660) {
+    operation = "NORMALIZE"
+    inputs {
+      (0: "Vector") -> "Out D"(0: "Vector"),
+    }
+  }
+
+  node "Out S" [ShaderNodeVectorMath] @(2300, -660) {
+    operation = "SCALE"
+    inputs {
+      (0: "Vector") -> "Out N"(0: "Vector"),
+      (3: "Scale") -> "Radius"(0: "Value"),
+    }
+  }
+
+  node "P Round" [ShaderNodeVectorMath] @(2540, -600) {
+    inputs {
+      (0: "Vector") -> "Q"(0: "Vector"),
+      (1: "Vector") -> "Out S"(0: "Vector"),
+    }
+  }
+
+  // ---- pass 2: one chipped corner, cut by a plane -----------------------
+
+  node "Ch Pick" [GeometryNodeGroup] @(380, -1000) {
+    node_tree = "mas Hash"
+    inputs {
+      ("X") -> "Read ID"(0: "Attribute"),
+      ("Y") = 11.0,
+      ("Channel") = 30.0,
+      ("Seed") -> "Group Input"("Seed"),
+    }
+  }
+
+  expr<float> "Ch Flag" @(620, -1000) {
+    expression = "less_than(h, chance)"
+    inputs {
+      "h" -> "Ch Pick"(0: "Value"),
+      "chance" -> "Group Input"("Chip Chance"),
+    }
+  }
+
+  node "Ch HX" [GeometryNodeGroup] @(380, -1180) {
+    node_tree = "mas Hash"
+    inputs {
+      ("X") -> "Read ID"(0: "Attribute"),
+      ("Y") = 1.0,
+      ("Channel") = 31.0,
+      ("Seed") -> "Group Input"("Seed"),
+    }
+  }
+
+  node "Ch HY" [GeometryNodeGroup] @(380, -1340) {
+    node_tree = "mas Hash"
+    inputs {
+      ("X") -> "Read ID"(0: "Attribute"),
+      ("Y") = 2.0,
+      ("Channel") = 32.0,
+      ("Seed") -> "Group Input"("Seed"),
+    }
+  }
+
+  node "Ch HZ" [GeometryNodeGroup] @(380, -1500) {
+    node_tree = "mas Hash"
+    inputs {
+      ("X") -> "Read ID"(0: "Attribute"),
+      ("Y") = 3.0,
+      ("Channel") = 33.0,
+      ("Seed") -> "Group Input"("Seed"),
+    }
+  }
+
+  expr<float> "Ch SX" @(620, -1180) {
+    expression = "1.0 - 2.0 * less_than(h, 0.5)"
+    inputs {
+      "h" -> "Ch HX"(0: "Value"),
+    }
+  }
+
+  expr<float> "Ch SY" @(620, -1340) {
+    expression = "1.0 - 2.0 * less_than(h, 0.5)"
+    inputs {
+      "h" -> "Ch HY"(0: "Value"),
+    }
+  }
+
+  expr<float> "Ch SZ" @(620, -1500) {
+    expression = "1.0 - 2.0 * less_than(h, 0.5)"
+    inputs {
+      "h" -> "Ch HZ"(0: "Value"),
+    }
+  }
+
+  node "Ch S" [ShaderNodeCombineXYZ] @(860, -1340) {
+    inputs {
+      (0: "X") -> "Ch SX"(0: "Value"),
+      (1: "Y") -> "Ch SY"(0: "Value"),
+      (2: "Z") -> "Ch SZ"(0: "Value"),
+    }
+  }
+
+  node "Ch N" [ShaderNodeVectorMath] @(1100, -1340) {
+    operation = "NORMALIZE"
+    inputs {
+      (0: "Vector") -> "Ch S"(0: "Vector"),
+    }
+  }
+
+  node "Ch Corner" [ShaderNodeVectorMath] @(1100, -1500) {
+    operation = "MULTIPLY"
+    inputs {
+      (0: "Vector") -> "Read E"(0: "Attribute"),
+      (1: "Vector") -> "Ch S"(0: "Vector"),
+    }
+  }
+
+  node "Ch Reach" [ShaderNodeVectorMath] @(1340, -1440) {
+    operation = "DOT_PRODUCT"
+    inputs {
+      (0: "Vector") -> "Ch Corner"(0: "Vector"),
+      (1: "Vector") -> "Ch N"(0: "Vector"),
+    }
+  }
+
+  node "Ch HD" [GeometryNodeGroup] @(380, -1660) {
+    node_tree = "mas Hash"
+    inputs {
+      ("X") -> "Read ID"(0: "Attribute"),
+      ("Y") = 12.0,
+      ("Channel") = 34.0,
+      ("Seed") -> "Group Input"("Seed"),
+    }
+  }
+
+  expr<float> "Ch Cut" @(1580, -1440) {
+    expression = "reach - min(depth * (0.5 + 0.8 * h), 0.9 * emin)"
+    inputs {
+      "reach" -> "Ch Reach"(1: "Value"),
+      "depth" -> "Group Input"("Chip Depth"),
+      "h" -> "Ch HD"(0: "Value"),
+      "emin" -> "E Min"(0: "Value"),
+    }
+  }
+
+  node "Ch Dot" [ShaderNodeVectorMath] @(2780, -1200) {
+    operation = "DOT_PRODUCT"
+    inputs {
+      (0: "Vector") -> "P Round"(0: "Vector"),
+      (1: "Vector") -> "Ch N"(0: "Vector"),
+    }
+  }
+
+  expr<float> "Ch Push" @(3020, -1200) {
+    expression = "0.0 - max(d - cut, 0.0) * flag"
+    inputs {
+      "d" -> "Ch Dot"(1: "Value"),
+      "cut" -> "Ch Cut"(0: "Value"),
+      "flag" -> "Ch Flag"(0: "Value"),
+    }
+  }
+
+  node "Ch Off" [ShaderNodeVectorMath] @(3260, -1200) {
+    operation = "SCALE"
+    inputs {
+      (0: "Vector") -> "Ch N"(0: "Vector"),
+      (3: "Scale") -> "Ch Push"(0: "Value"),
+    }
+  }
+
+  node "P Chip" [ShaderNodeVectorMath] @(3500, -900) {
+    inputs {
+      (0: "Vector") -> "P Round"(0: "Vector"),
+      (1: "Vector") -> "Ch Off"(0: "Vector"),
+    }
+  }
+
+  // ---- pass 3: end cuts, a plan shear pinned at the stone's middle ------
+  //
+  // x' = x - y * (tan(head) * max(x, 0) + tan(tail) * max(-x, 0)) / ex
+  // is the identity at x = 0 and turns each end face into the plane of its
+  // cut; vertices only move, so the solid stays closed.
+
+  node "Read CutH" [GeometryNodeInputNamedAttribute] @(3260, -400) {
+    inputs {
+      (0: "Name") = "mas_ch",
+    }
+  }
+
+  node "Read CutT" [GeometryNodeInputNamedAttribute] @(3260, -540) {
+    inputs {
+      (0: "Name") = "mas_ct",
+    }
+  }
+
+  node "P XYZ" [ShaderNodeSeparateXYZ] @(3260, -700) {
+    inputs {
+      (0: "Vector") -> "P Chip"(0: "Vector"),
+    }
+  }
+
+  expr<float> "Cut X" @(3500, -500) {
+    expression = "x - y * (tan(ha) * max(x, 0.0) + tan(ta) * max(0.0 - x, 0.0)) / ex"
+    inputs {
+      "x" -> "P XYZ"(0: "X"),
+      "y" -> "P XYZ"(1: "Y"),
+      "ha" -> "Read CutH"(0: "Attribute"),
+      "ta" -> "Read CutT"(0: "Attribute"),
+      "ex" -> "E XYZ"(0: "X"),
+    }
+  }
+
+  node "P Cut" [ShaderNodeCombineXYZ] @(3500, -700) {
+    inputs {
+      (0: "X") -> "Cut X"(0: "Value"),
+      (1: "Y") -> "P XYZ"(1: "Y"),
+      (2: "Z") -> "P XYZ"(2: "Z"),
+    }
+  }
+
+  // ---- back to the world, then pass 4: mild noise -----------------------
+
+  node "P Back" [FunctionNodeRotateVector] @(3740, -900) {
+    inputs {
+      (0: "Vector") -> "P Cut"(0: "Vector"),
+      (1: "Rotation") -> "Read R"(0: "Attribute"),
+    }
+  }
+
+  node "P World" [ShaderNodeVectorMath] @(3980, -900) {
+    inputs {
+      (0: "Vector") -> "Read C"(0: "Attribute"),
+      (1: "Vector") -> "P Back"(0: "Vector"),
+    }
+  }
+
+  node "Shape" [GeometryNodeSetPosition] @(4220, 120) {
+    inputs {
+      (0: "Geometry") -> "Real"(0: "Geometry"),
+      (2: "Position") -> "P World"(0: "Vector"),
+    }
+  }
+
+  expr<float> "N W" @(3980, -1500) {
+    expression = "seed + 0.123"
+    inputs {
+      "seed" -> "Group Input"("Seed"),
+    }
+  }
+
+  node "N Tex" [ShaderNodeTexNoise] @(4220, -1500) {
+    noise_dimensions = "4D"
+    noise_type = "FBM"
+    normalize = true
+    inputs {
+      (0: "Vector") -> "Pos"(0: "Position"),
+      (1: "W") -> "N W"(0: "Value"),
+      (2: "Scale") = 7.0,
+      (3: "Detail") = 3.0,
+    }
+  }
+
+  node "N Cen" [ShaderNodeVectorMath] @(4460, -1500) {
+    operation = "SUBTRACT"
+    inputs {
+      (0: "Vector") -> "N Tex"(1: "Color"),
+      (1: "Vector") = (0.5, 0.5, 0.5),
+    }
+  }
+
+  expr<float> "N Amp" @(4460, -1660) {
+    expression = "2.0 * irr"
+    inputs {
+      "irr" -> "Group Input"("Irregularity"),
+    }
+  }
+
+  node "N Off" [ShaderNodeVectorMath] @(4700, -1500) {
+    operation = "SCALE"
+    inputs {
+      (0: "Vector") -> "N Cen"(0: "Vector"),
+      (3: "Scale") -> "N Amp"(0: "Value"),
+    }
+  }
+
+  node "Weather" [GeometryNodeSetPosition] @(4700, 120) {
+    inputs {
+      (0: "Geometry") -> "Shape"(0: "Geometry"),
+      (3: "Offset") -> "N Off"(0: "Vector"),
+    }
+  }
+
+  // ---- drop the working frame so the output carries only the caller's ---
+
+  node "Rm C" [GeometryNodeRemoveAttribute] @(4940, 120) {
+    inputs {
+      (0: "Geometry") -> "Weather"(0: "Geometry"),
+      (2: "Name") = "mas_c",
+    }
+  }
+
+  node "Rm E" [GeometryNodeRemoveAttribute] @(5140, 120) {
+    inputs {
+      (0: "Geometry") -> "Rm C"(0: "Geometry"),
+      (2: "Name") = "mas_e",
+    }
+  }
+
+  node "Rm R" [GeometryNodeRemoveAttribute] @(5340, 120) {
+    inputs {
+      (0: "Geometry") -> "Rm E"(0: "Geometry"),
+      (2: "Name") = "mas_r",
+    }
+  }
+
+  node "Rm ID" [GeometryNodeRemoveAttribute] @(5540, 120) {
+    inputs {
+      (0: "Geometry") -> "Rm R"(0: "Geometry"),
+      (2: "Name") = "mas_id",
+    }
+  }
+
+  node "Rm CH" [GeometryNodeRemoveAttribute] @(5740, 120) {
+    inputs {
+      (0: "Geometry") -> "Rm ID"(0: "Geometry"),
+      (2: "Name") = "mas_ch",
+    }
+  }
+
+  node "Rm CT" [GeometryNodeRemoveAttribute] @(5940, 120) {
+    inputs {
+      (0: "Geometry") -> "Rm CH"(0: "Geometry"),
+      (2: "Name") = "mas_ct",
+    }
+  }
+
+  node "Group Output" [NodeGroupOutput] @(6180, 120) {
+    inputs {
+      ("Geometry") -> "Rm CT"(0: "Geometry"),
+    }
+  }
+}

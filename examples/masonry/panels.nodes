@@ -1,0 +1,1023 @@
+// shell/panels.nodes — read a wall's topology off a shell.
+//
+// A shell is the wall surface with no thickness: open faces standing on a flat
+// base. Everything the layout needs is already in the mesh, so this group
+// reads it rather than reconstructing it.
+//
+//   the base edges           the wall's plan, and its arc length
+//   a bend at a base vertex  gentle (<= Curve Angle) is one continuous wall,
+//                            sharper is a corner where two panels end
+//   a valence-1 base vertex  a free end
+//   a valence-3 base vertex  a T: the straightest pair runs through, the odd
+//                            edge is a stem that stops against it
+//   the vertical edge above  the wall's height at that plan vertex
+//
+// Output is a curve, one spline per panel, carrying per point:
+//
+//   mas_h     wall height above this point
+//   mas_thk   wall thickness here (the shell's "thickness" attribute, or the
+//             Thickness input where that attribute is absent)
+//   mas_vid   the shell vertex this came from — shared by the two panel ends
+//             that meet at a corner, which is how they agree whose turn it is
+//   mas_val   how many base edges met at that shell vertex
+//   mas_d     how far a panel end runs past the junction: to where the mating
+//             wall's outer face crosses this wall's centreline
+//   mas_d0    the two edge directions leaving the junction vertex, for the
+//   mas_d1    wall tool to cut its end faces parallel to the mating wall
+//   mas_own   1 on the first of the two ends at a junction, 0 on the second:
+//             the alternation a quoin is made of
+//
+// The method: mark which pairs of base edges continue through each vertex,
+// split every base edge apart, then weld back only the marked pairs. What is
+// left is one chain per panel, and Mesh to Curve turns each into a spline.
+
+tree "mas Shell Panels" [GeometryNodeTree] {
+  interface {
+    inputs {
+      "Shell": [NodeSocketGeometry],
+      "Curve Angle": [NodeSocketFloat] = 30.0,
+      "Thickness": [NodeSocketFloat] = 0.5,
+    }
+    outputs {
+      "Panels": [NodeSocketGeometry],
+      "Count": [NodeSocketInt],
+      "Base": [NodeSocketFloat],
+      "Top": [NodeSocketFloat],
+    }
+  }
+
+  node "Group Input" [NodeGroupInput] @(-3200, 0) {
+  }
+
+  node "Pos" [GeometryNodeInputPosition] @(-3200, -300) {
+  }
+
+  node "Pos XYZ" [ShaderNodeSeparateXYZ] @(-2960, -300) {
+    inputs {
+      (0: "Vector") -> "Pos"(0: "Position"),
+    }
+  }
+
+  node "Z Stat" [GeometryNodeAttributeStatistic] @(-2720, 200) {
+    inputs {
+      (0: "Geometry") -> "Group Input"("Shell"),
+      (2: "Attribute") -> "Pos XYZ"(2: "Z"),
+    }
+  }
+
+  // ---- height: the tallest edge leaving each shell vertex ----------------
+
+  node "E Verts" [GeometryNodeInputMeshEdgeVertices] @(-2960, -600) {
+  }
+
+  node "EP1 XYZ" [ShaderNodeSeparateXYZ] @(-2720, -600) {
+    inputs {
+      (0: "Vector") -> "E Verts"(2: "Position 1"),
+    }
+  }
+
+  node "EP2 XYZ" [ShaderNodeSeparateXYZ] @(-2720, -760) {
+    inputs {
+      (0: "Vector") -> "E Verts"(3: "Position 2"),
+    }
+  }
+
+  expr<float> "Edge Top" @(-2480, -680) {
+    expression = "max(z1, z2)"
+    inputs {
+      "z1" -> "EP1 XYZ"(2: "Z"),
+      "z2" -> "EP2 XYZ"(2: "Z"),
+    }
+  }
+
+  node "V Idx" [GeometryNodeInputIndex] @(-2960, -900) {
+  }
+
+  node "EOV N" [GeometryNodeEdgesOfVertex] @(-2720, -900) {
+    inputs {
+      (0: "Vertex Index") -> "V Idx"(0: "Index"),
+    }
+  }
+
+  expr<float> "Top Sort" @(-2480, -900) {
+    expression = "n - 1.0"
+    inputs {
+      "n" -> "EOV N"(1: "Total"),
+    }
+  }
+
+  node "EOV Top" [GeometryNodeEdgesOfVertex] @(-2240, -900) {
+    inputs {
+      (0: "Vertex Index") -> "V Idx"(0: "Index"),
+      (1: "Weights") -> "Edge Top"(0: "Value"),
+      (2: "Sort Index") -> "Top Sort"(0: "Value"),
+    }
+  }
+
+  node "Top Z" [GeometryNodeSampleIndex] @(-2000, -900) {
+    domain = "EDGE"
+    inputs {
+      (0: "Geometry") -> "Group Input"("Shell"),
+      (1: "Value") -> "Edge Top"(0: "Value"),
+      (2: "Index") -> "EOV Top"(0: "Edge Index"),
+    }
+  }
+
+  // A shell may stack faces: an extruded section is a face whose base edge
+  // sits on the top edge of the one below, sharing its vertices. One edge
+  // hop only reaches the first level, so the column top is lifted through
+  // the stack — each pass takes the best top over a vertex's own vertical
+  // edges, and horizontal edges carry nothing, so a stepped top stays
+  // stepped rather than bleeding sideways.
+
+  node "St Top" [GeometryNodeStoreNamedAttribute] @(-2000, -1300) {
+    inputs {
+      (0: "Geometry") -> "Group Input"("Shell"),
+      (2: "Name") = "mas_top",
+      (3: "Value") -> "Top Z"(0: "Value"),
+    }
+  }
+
+  repeat "Lift" @(-1760, -1300) {
+    iterations = 8
+    items {
+      "Geometry": [NodeSocketGeometry] -> "St Top"(0: "Geometry"),
+    }
+
+    node "L Idx" [GeometryNodeInputIndex] @(0, -200) {
+    }
+
+    node "L EV" [GeometryNodeInputMeshEdgeVertices] @(0, -320) {
+    }
+
+    node "L P1" [ShaderNodeSeparateXYZ] @(200, -320) {
+      inputs {
+        (0: "Vector") -> "L EV"(2: "Position 1"),
+      }
+    }
+
+    node "L P2" [ShaderNodeSeparateXYZ] @(200, -460) {
+      inputs {
+        (0: "Vector") -> "L EV"(3: "Position 2"),
+      }
+    }
+
+    node "R Top" [GeometryNodeInputNamedAttribute] @(0, -600) {
+      inputs {
+        (0: "Name") = "mas_top",
+      }
+    }
+
+    node "L V1" [GeometryNodeSampleIndex] @(200, -600) {
+      inputs {
+        (0: "Geometry") -> "repeat"(0: "Geometry"),
+        (1: "Value") -> "R Top"(0: "Attribute"),
+        (2: "Index") -> "L EV"(0: "Vertex Index 1"),
+      }
+    }
+
+    node "L V2" [GeometryNodeSampleIndex] @(200, -740) {
+      inputs {
+        (0: "Geometry") -> "repeat"(0: "Geometry"),
+        (1: "Value") -> "R Top"(0: "Attribute"),
+        (2: "Index") -> "L EV"(1: "Vertex Index 2"),
+      }
+    }
+
+    expr<float> "L Edge" @(440, -600) {
+      expression =
+        "less_than((x1 - x2) * (x1 - x2) + (y1 - y2) * (y1 - y2), 1e-8)
+         * max(a, b)"
+      inputs {
+        "x1" -> "L P1"(0: "X"),
+        "y1" -> "L P1"(1: "Y"),
+        "x2" -> "L P2"(0: "X"),
+        "y2" -> "L P2"(1: "Y"),
+        "a" -> "L V1"(0: "Value"),
+        "b" -> "L V2"(0: "Value"),
+      }
+    }
+
+    node "L EOV N" [GeometryNodeEdgesOfVertex] @(440, -800) {
+      inputs {
+        (0: "Vertex Index") -> "L Idx"(0: "Index"),
+      }
+    }
+
+    expr<float> "L Sort" @(680, -800) {
+      expression = "n - 1.0"
+      inputs {
+        "n" -> "L EOV N"(1: "Total"),
+      }
+    }
+
+    node "L EOV" [GeometryNodeEdgesOfVertex] @(680, -600) {
+      inputs {
+        (0: "Vertex Index") -> "L Idx"(0: "Index"),
+        (1: "Weights") -> "L Edge"(0: "Value"),
+        (2: "Sort Index") -> "L Sort"(0: "Value"),
+      }
+    }
+
+    node "L Best" [GeometryNodeSampleIndex] @(920, -600) {
+      domain = "EDGE"
+      inputs {
+        (0: "Geometry") -> "repeat"(0: "Geometry"),
+        (1: "Value") -> "L Edge"(0: "Value"),
+        (2: "Index") -> "L EOV"(0: "Edge Index"),
+      }
+    }
+
+    expr<float> "L New" @(1160, -600) {
+      expression = "max(own, best)"
+      inputs {
+        "own" -> "R Top"(0: "Attribute"),
+        "best" -> "L Best"(0: "Value"),
+      }
+    }
+
+    node "L St" [GeometryNodeStoreNamedAttribute] @(1400, -300) {
+      inputs {
+        (0: "Geometry") -> "repeat"(0: "Geometry"),
+        (2: "Name") = "mas_top",
+        (3: "Value") -> "L New"(0: "Value"),
+      }
+    }
+
+    outputs {
+      "Geometry" -> "L St"(0: "Geometry"),
+    }
+  }
+
+  node "R Lifted" [GeometryNodeInputNamedAttribute] @(-1520, -1300) {
+    inputs {
+      (0: "Name") = "mas_top",
+    }
+  }
+
+  expr<float> "Vert H" @(-1760, -900) {
+    expression = "max(tz - z, 0.0)"
+    inputs {
+      "tz" -> "R Lifted"(0: "Attribute"),
+      "z" -> "Pos XYZ"(2: "Z"),
+    }
+  }
+
+  // ---- thickness: the shell's own attribute where it has one -------------
+
+  node "Thk Attr" [GeometryNodeInputNamedAttribute] @(-2960, -1100) {
+    inputs {
+      (0: "Name") = "thickness",
+    }
+  }
+
+  expr<float> "Vert Thk" @(-2720, -1100) {
+    expression = "t + greater_than(a, 1e-6) * (a - t)"
+    inputs {
+      "a" -> "Thk Attr"(0: "Attribute"),
+      "t" -> "Group Input"("Thickness"),
+    }
+  }
+
+  node "St H" [GeometryNodeStoreNamedAttribute] @(-2480, 200) {
+    inputs {
+      (0: "Geometry") -> "Lift"(0: "Geometry"),
+      (2: "Name") = "mas_h",
+      (3: "Value") -> "Vert H"(0: "Value"),
+    }
+  }
+
+  node "St Thk" [GeometryNodeStoreNamedAttribute] @(-2240, 200) {
+    inputs {
+      (0: "Geometry") -> "St H"(0: "Geometry"),
+      (2: "Name") = "mas_thk",
+      (3: "Value") -> "Vert Thk"(0: "Value"),
+    }
+  }
+
+  node "St Vid" [GeometryNodeStoreNamedAttribute] @(-2000, 200) {
+    data_type = "INT"
+    inputs {
+      (0: "Geometry") -> "St Thk"(0: "Geometry"),
+      (2: "Name") = "mas_vid",
+      (3: "Value") -> "V Idx"(0: "Index"),
+    }
+  }
+
+  // ---- strip everything but the base wire --------------------------------
+
+  expr<float> "Not Base Edge" @(-2240, 0) {
+    expression = "1.0 - less_than(et, zmin + 1e-3)"
+    inputs {
+      "et" -> "Edge Top"(0: "Value"),
+      "zmin" -> "Z Stat"(3: "Min"),
+    }
+  }
+
+  expr<float> "Not Base Vert" @(-2240, -100) {
+    expression = "1.0 - less_than(z, zmin + 1e-3)"
+    inputs {
+      "z" -> "Pos XYZ"(2: "Z"),
+      "zmin" -> "Z Stat"(3: "Min"),
+    }
+  }
+
+  node "Rm Top" [GeometryNodeRemoveAttribute] @(-1880, 200) {
+    inputs {
+      (0: "Geometry") -> "St Vid"(0: "Geometry"),
+      (2: "Name") = "mas_top",
+    }
+  }
+
+  node "Cut Edges" [GeometryNodeDeleteGeometry] @(-1760, 200) {
+    domain = "EDGE"
+    mode = "EDGE_FACE"
+    inputs {
+      (0: "Geometry") -> "Rm Top"(0: "Geometry"),
+      (1: "Selection") -> "Not Base Edge"(0: "Value"),
+    }
+  }
+
+  node "Wire" [GeometryNodeDeleteGeometry] @(-1520, 200) {
+    inputs {
+      (0: "Geometry") -> "Cut Edges"(0: "Geometry"),
+      (1: "Selection") -> "Not Base Vert"(0: "Value"),
+    }
+  }
+
+  // ---- classify each base vertex ----------------------------------------
+  //
+  // Up to three base edges are examined per vertex. Two edges continue
+  // through if the bend between them is within Curve Angle; three continue
+  // as the straightest pair, leaving the odd one as a stem.
+
+  node "B Nbr" [GeometryNodeInputMeshVertexNeighbors] @(-1520, -300) {
+  }
+
+  node "E0" [GeometryNodeEdgesOfVertex] @(-1520, -600) {
+    inputs {
+      (0: "Vertex Index") -> "V Idx"(0: "Index"),
+      (2: "Sort Index") = 0,
+    }
+  }
+
+  node "E1" [GeometryNodeEdgesOfVertex] @(-1520, -760) {
+    inputs {
+      (0: "Vertex Index") -> "V Idx"(0: "Index"),
+      (2: "Sort Index") = 1,
+    }
+  }
+
+  node "E2" [GeometryNodeEdgesOfVertex] @(-1520, -920) {
+    inputs {
+      (0: "Vertex Index") -> "V Idx"(0: "Index"),
+      (2: "Sort Index") = 2,
+    }
+  }
+
+  node "E0 V1" [GeometryNodeSampleIndex] @(-1280, -520) {
+    data_type = "INT"
+    domain = "EDGE"
+    inputs {
+      (0: "Geometry") -> "Wire"(0: "Geometry"),
+      (1: "Value") -> "E Verts"(0: "Vertex Index 1"),
+      (2: "Index") -> "E0"(0: "Edge Index"),
+    }
+  }
+
+  node "E0 P1" [GeometryNodeSampleIndex] @(-1280, -640) {
+    data_type = "FLOAT_VECTOR"
+    domain = "EDGE"
+    inputs {
+      (0: "Geometry") -> "Wire"(0: "Geometry"),
+      (1: "Value") -> "E Verts"(2: "Position 1"),
+      (2: "Index") -> "E0"(0: "Edge Index"),
+    }
+  }
+
+  node "E0 P2" [GeometryNodeSampleIndex] @(-1280, -760) {
+    data_type = "FLOAT_VECTOR"
+    domain = "EDGE"
+    inputs {
+      (0: "Geometry") -> "Wire"(0: "Geometry"),
+      (1: "Value") -> "E Verts"(3: "Position 2"),
+      (2: "Index") -> "E0"(0: "Edge Index"),
+    }
+  }
+
+  node "E1 V1" [GeometryNodeSampleIndex] @(-1280, -880) {
+    data_type = "INT"
+    domain = "EDGE"
+    inputs {
+      (0: "Geometry") -> "Wire"(0: "Geometry"),
+      (1: "Value") -> "E Verts"(0: "Vertex Index 1"),
+      (2: "Index") -> "E1"(0: "Edge Index"),
+    }
+  }
+
+  node "E1 P1" [GeometryNodeSampleIndex] @(-1280, -1000) {
+    data_type = "FLOAT_VECTOR"
+    domain = "EDGE"
+    inputs {
+      (0: "Geometry") -> "Wire"(0: "Geometry"),
+      (1: "Value") -> "E Verts"(2: "Position 1"),
+      (2: "Index") -> "E1"(0: "Edge Index"),
+    }
+  }
+
+  node "E1 P2" [GeometryNodeSampleIndex] @(-1280, -1120) {
+    data_type = "FLOAT_VECTOR"
+    domain = "EDGE"
+    inputs {
+      (0: "Geometry") -> "Wire"(0: "Geometry"),
+      (1: "Value") -> "E Verts"(3: "Position 2"),
+      (2: "Index") -> "E1"(0: "Edge Index"),
+    }
+  }
+
+  node "E2 V1" [GeometryNodeSampleIndex] @(-1280, -1240) {
+    data_type = "INT"
+    domain = "EDGE"
+    inputs {
+      (0: "Geometry") -> "Wire"(0: "Geometry"),
+      (1: "Value") -> "E Verts"(0: "Vertex Index 1"),
+      (2: "Index") -> "E2"(0: "Edge Index"),
+    }
+  }
+
+  node "E2 P1" [GeometryNodeSampleIndex] @(-1280, -1360) {
+    data_type = "FLOAT_VECTOR"
+    domain = "EDGE"
+    inputs {
+      (0: "Geometry") -> "Wire"(0: "Geometry"),
+      (1: "Value") -> "E Verts"(2: "Position 1"),
+      (2: "Index") -> "E2"(0: "Edge Index"),
+    }
+  }
+
+  node "E2 P2" [GeometryNodeSampleIndex] @(-1280, -1480) {
+    data_type = "FLOAT_VECTOR"
+    domain = "EDGE"
+    inputs {
+      (0: "Geometry") -> "Wire"(0: "Geometry"),
+      (1: "Value") -> "E Verts"(3: "Position 2"),
+      (2: "Index") -> "E2"(0: "Edge Index"),
+    }
+  }
+
+  expr<float> "F0" @(-1040, -520) {
+    expression = "compare(v, i, 0.5)"
+    inputs {
+      "v" -> "E0 V1"(0: "Value"),
+      "i" -> "V Idx"(0: "Index"),
+    }
+  }
+
+  expr<float> "F1" @(-1040, -880) {
+    expression = "compare(v, i, 0.5)"
+    inputs {
+      "v" -> "E1 V1"(0: "Value"),
+      "i" -> "V Idx"(0: "Index"),
+    }
+  }
+
+  expr<float> "F2" @(-1040, -1240) {
+    expression = "compare(v, i, 0.5)"
+    inputs {
+      "v" -> "E2 V1"(0: "Value"),
+      "i" -> "V Idx"(0: "Index"),
+    }
+  }
+
+  node "O0" [ShaderNodeMix] @(-800, -640) {
+    data_type = "VECTOR"
+    inputs {
+      (0: "Factor") -> "F0"(0: "Value"),
+      (4: "A") -> "E0 P1"(0: "Value"),
+      (5: "B") -> "E0 P2"(0: "Value"),
+    }
+  }
+
+  node "O1" [ShaderNodeMix] @(-800, -1000) {
+    data_type = "VECTOR"
+    inputs {
+      (0: "Factor") -> "F1"(0: "Value"),
+      (4: "A") -> "E1 P1"(0: "Value"),
+      (5: "B") -> "E1 P2"(0: "Value"),
+    }
+  }
+
+  node "O2" [ShaderNodeMix] @(-800, -1360) {
+    data_type = "VECTOR"
+    inputs {
+      (0: "Factor") -> "F2"(0: "Value"),
+      (4: "A") -> "E2 P1"(0: "Value"),
+      (5: "B") -> "E2 P2"(0: "Value"),
+    }
+  }
+
+  node "D0 Raw" [ShaderNodeVectorMath] @(-560, -640) {
+    operation = "SUBTRACT"
+    inputs {
+      (0: "Vector") -> "O0"(1: "Result"),
+      (1: "Vector") -> "Pos"(0: "Position"),
+    }
+  }
+
+  node "D1 Raw" [ShaderNodeVectorMath] @(-560, -1000) {
+    operation = "SUBTRACT"
+    inputs {
+      (0: "Vector") -> "O1"(1: "Result"),
+      (1: "Vector") -> "Pos"(0: "Position"),
+    }
+  }
+
+  node "D2 Raw" [ShaderNodeVectorMath] @(-560, -1360) {
+    operation = "SUBTRACT"
+    inputs {
+      (0: "Vector") -> "O2"(1: "Result"),
+      (1: "Vector") -> "Pos"(0: "Position"),
+    }
+  }
+
+  node "D0" [ShaderNodeVectorMath] @(-320, -640) {
+    operation = "NORMALIZE"
+    inputs {
+      (0: "Vector") -> "D0 Raw"(0: "Vector"),
+    }
+  }
+
+  node "D1" [ShaderNodeVectorMath] @(-320, -1000) {
+    operation = "NORMALIZE"
+    inputs {
+      (0: "Vector") -> "D1 Raw"(0: "Vector"),
+    }
+  }
+
+  node "D2" [ShaderNodeVectorMath] @(-320, -1360) {
+    operation = "NORMALIZE"
+    inputs {
+      (0: "Vector") -> "D2 Raw"(0: "Vector"),
+    }
+  }
+
+  node "Dot01" [ShaderNodeVectorMath] @(-80, -640) {
+    operation = "DOT_PRODUCT"
+    inputs {
+      (0: "Vector") -> "D0"(0: "Vector"),
+      (1: "Vector") -> "D1"(0: "Vector"),
+    }
+  }
+
+  node "Dot02" [ShaderNodeVectorMath] @(-80, -800) {
+    operation = "DOT_PRODUCT"
+    inputs {
+      (0: "Vector") -> "D0"(0: "Vector"),
+      (1: "Vector") -> "D2"(0: "Vector"),
+    }
+  }
+
+  node "Dot12" [ShaderNodeVectorMath] @(-80, -960) {
+    operation = "DOT_PRODUCT"
+    inputs {
+      (0: "Vector") -> "D1"(0: "Vector"),
+      (1: "Vector") -> "D2"(0: "Vector"),
+    }
+  }
+
+  expr<float> "A01" @(160, -640) {
+    expression = "acos(min(1.0, max(-1.0, d)))"
+    inputs {
+      "d" -> "Dot01"(1: "Value"),
+    }
+  }
+
+  expr<float> "A02" @(160, -800) {
+    expression = "acos(min(1.0, max(-1.0, d)))"
+    inputs {
+      "d" -> "Dot02"(1: "Value"),
+    }
+  }
+
+  expr<float> "A12" @(160, -960) {
+    expression = "acos(min(1.0, max(-1.0, d)))"
+    inputs {
+      "d" -> "Dot12"(1: "Value"),
+    }
+  }
+
+  expr<float> "Thr" @(160, -480) {
+    expression = "pi - radians(a)"
+    inputs {
+      "a" -> "Group Input"("Curve Angle"),
+    }
+  }
+
+  expr<float> "Best" @(400, -800) {
+    expression = "max(a01, max(a02, a12))"
+    inputs {
+      "a01" -> "A01"(0: "Value"),
+      "a02" -> "A02"(0: "Value"),
+      "a12" -> "A12"(0: "Value"),
+    }
+  }
+
+  expr<float> "Sel01" @(640, -700) {
+    expression = "compare(a01, b, 1e-6)"
+    inputs {
+      "a01" -> "A01"(0: "Value"),
+      "b" -> "Best"(0: "Value"),
+    }
+  }
+
+  expr<float> "Sel02" @(640, -820) {
+    expression = "(1.0 - s01) * compare(a02, b, 1e-6)"
+    inputs {
+      "s01" -> "Sel01"(0: "Value"),
+      "a02" -> "A02"(0: "Value"),
+      "b" -> "Best"(0: "Value"),
+    }
+  }
+
+  expr<float> "Sel12" @(640, -940) {
+    expression = "(1.0 - s01) * (1.0 - s02)"
+    inputs {
+      "s01" -> "Sel01"(0: "Value"),
+      "s02" -> "Sel02"(0: "Value"),
+    }
+  }
+
+  expr<float> "Two" @(400, -300) {
+    expression = "compare(n, 2.0, 0.5)"
+    inputs {
+      "n" -> "B Nbr"(0: "Vertex Count"),
+    }
+  }
+
+  expr<float> "Three" @(400, -400) {
+    expression = "compare(n, 3.0, 0.5)"
+    inputs {
+      "n" -> "B Nbr"(0: "Vertex Count"),
+    }
+  }
+
+  expr<float> "Weld" @(880, -500) {
+    expression =
+      "two * greater_than(a01, thr) + three * greater_than(b, thr)"
+    inputs {
+      "two" -> "Two"(0: "Value"),
+      "three" -> "Three"(0: "Value"),
+      "a01" -> "A01"(0: "Value"),
+      "b" -> "Best"(0: "Value"),
+      "thr" -> "Thr"(0: "Value"),
+    }
+  }
+
+  expr<float> "Sort A" @(880, -700) {
+    expression = "three * s12"
+    inputs {
+      "three" -> "Three"(0: "Value"),
+      "s12" -> "Sel12"(0: "Value"),
+    }
+  }
+
+  expr<float> "Sort B" @(880, -820) {
+    expression = "two + three * (s01 + 2.0 * s02 + 2.0 * s12)"
+    inputs {
+      "two" -> "Two"(0: "Value"),
+      "three" -> "Three"(0: "Value"),
+      "s01" -> "Sel01"(0: "Value"),
+      "s02" -> "Sel02"(0: "Value"),
+      "s12" -> "Sel12"(0: "Value"),
+    }
+  }
+
+  node "EA" [GeometryNodeEdgesOfVertex] @(1120, -700) {
+    inputs {
+      (0: "Vertex Index") -> "V Idx"(0: "Index"),
+      (2: "Sort Index") -> "Sort A"(0: "Value"),
+    }
+  }
+
+  node "EB" [GeometryNodeEdgesOfVertex] @(1120, -820) {
+    inputs {
+      (0: "Vertex Index") -> "V Idx"(0: "Index"),
+      (2: "Sort Index") -> "Sort B"(0: "Value"),
+    }
+  }
+
+  expr<float> "WA" @(1360, -700) {
+    expression = "w * (ea + 1.0) - 1.0"
+    inputs {
+      "w" -> "Weld"(0: "Value"),
+      "ea" -> "EA"(0: "Edge Index"),
+    }
+  }
+
+  expr<float> "WB" @(1360, -820) {
+    expression = "w * (eb + 1.0) - 1.0"
+    inputs {
+      "w" -> "Weld"(0: "Value"),
+      "eb" -> "EB"(0: "Edge Index"),
+    }
+  }
+
+  // how far a panel end runs past the junction: to the mating wall's outer
+  // face, which crosses this wall's centreline (t/2)/sin(f) out — t/2 at a
+  // right angle. The end face is then cut in that plane, so the stone's
+  // outer corner still reaches the (t/2)/tan(f/2) tip where the two outer
+  // faces meet. A stem at a T just pulls back to the through wall's face.
+
+  expr<float> "Reach" @(1360, -1000) {
+    expression =
+      "two * (1.0 - w) * min(2.0 * t, 0.5 * t / max(sin(a01), 1e-3))
+       + three * 0.5 * t"
+    inputs {
+      "two" -> "Two"(0: "Value"),
+      "three" -> "Three"(0: "Value"),
+      "w" -> "Weld"(0: "Value"),
+      "a01" -> "A01"(0: "Value"),
+      "t" -> "Vert Thk"(0: "Value"),
+    }
+  }
+
+  node "St WA" [GeometryNodeStoreNamedAttribute] @(1600, 200) {
+    data_type = "INT"
+    inputs {
+      (0: "Geometry") -> "Wire"(0: "Geometry"),
+      (2: "Name") = "mas_wa",
+      (3: "Value") -> "WA"(0: "Value"),
+    }
+  }
+
+  node "St WB" [GeometryNodeStoreNamedAttribute] @(1840, 200) {
+    data_type = "INT"
+    inputs {
+      (0: "Geometry") -> "St WA"(0: "Geometry"),
+      (2: "Name") = "mas_wb",
+      (3: "Value") -> "WB"(0: "Value"),
+    }
+  }
+
+  node "St Val" [GeometryNodeStoreNamedAttribute] @(2080, 200) {
+    inputs {
+      (0: "Geometry") -> "St WB"(0: "Geometry"),
+      (2: "Name") = "mas_val",
+      (3: "Value") -> "B Nbr"(0: "Vertex Count"),
+    }
+  }
+
+  node "St D" [GeometryNodeStoreNamedAttribute] @(2320, 200) {
+    inputs {
+      (0: "Geometry") -> "St Val"(0: "Geometry"),
+      (2: "Name") = "mas_d",
+      (3: "Value") -> "Reach"(0: "Value"),
+    }
+  }
+
+  // the two edge directions leaving the vertex, for the wall tool to work
+  // out which way the mating wall runs at a corner
+
+  node "St D0" [GeometryNodeStoreNamedAttribute] @(2440, 200) {
+    data_type = "FLOAT_VECTOR"
+    inputs {
+      (0: "Geometry") -> "St D"(0: "Geometry"),
+      (2: "Name") = "mas_d0",
+      (3: "Value") -> "D0"(0: "Vector"),
+    }
+  }
+
+  node "St D1" [GeometryNodeStoreNamedAttribute] @(2560, 200) {
+    data_type = "FLOAT_VECTOR"
+    inputs {
+      (0: "Geometry") -> "St D0"(0: "Geometry"),
+      (2: "Name") = "mas_d1",
+      (3: "Value") -> "D1"(0: "Vector"),
+    }
+  }
+
+  // ---- turn the vertex marks into a mark per edge end --------------------
+
+  node "R WA" [GeometryNodeInputNamedAttribute] @(2080, -300) {
+    data_type = "INT"
+    inputs {
+      (0: "Name") = "mas_wa",
+    }
+  }
+
+  node "R WB" [GeometryNodeInputNamedAttribute] @(2080, -420) {
+    data_type = "INT"
+    inputs {
+      (0: "Name") = "mas_wb",
+    }
+  }
+
+  node "WA1" [GeometryNodeSampleIndex] @(2320, -300) {
+    data_type = "INT"
+    inputs {
+      (0: "Geometry") -> "St D1"(0: "Geometry"),
+      (1: "Value") -> "R WA"(0: "Attribute"),
+      (2: "Index") -> "E Verts"(0: "Vertex Index 1"),
+    }
+  }
+
+  node "WB1" [GeometryNodeSampleIndex] @(2320, -420) {
+    data_type = "INT"
+    inputs {
+      (0: "Geometry") -> "St D1"(0: "Geometry"),
+      (1: "Value") -> "R WB"(0: "Attribute"),
+      (2: "Index") -> "E Verts"(0: "Vertex Index 1"),
+    }
+  }
+
+  node "WA2" [GeometryNodeSampleIndex] @(2320, -540) {
+    data_type = "INT"
+    inputs {
+      (0: "Geometry") -> "St D1"(0: "Geometry"),
+      (1: "Value") -> "R WA"(0: "Attribute"),
+      (2: "Index") -> "E Verts"(1: "Vertex Index 2"),
+    }
+  }
+
+  node "WB2" [GeometryNodeSampleIndex] @(2320, -660) {
+    data_type = "INT"
+    inputs {
+      (0: "Geometry") -> "St D1"(0: "Geometry"),
+      (1: "Value") -> "R WB"(0: "Attribute"),
+      (2: "Index") -> "E Verts"(1: "Vertex Index 2"),
+    }
+  }
+
+  expr<float> "W1" @(2560, -360) {
+    expression = "min(1.0, compare(a, i, 0.5) + compare(b, i, 0.5))"
+    inputs {
+      "a" -> "WA1"(0: "Value"),
+      "b" -> "WB1"(0: "Value"),
+      "i" -> "V Idx"(0: "Index"),
+    }
+  }
+
+  expr<float> "W2" @(2560, -600) {
+    expression = "min(1.0, compare(a, i, 0.5) + compare(b, i, 0.5))"
+    inputs {
+      "a" -> "WA2"(0: "Value"),
+      "b" -> "WB2"(0: "Value"),
+      "i" -> "V Idx"(0: "Index"),
+    }
+  }
+
+  node "St W1" [GeometryNodeStoreNamedAttribute] @(2800, 200) {
+    domain = "EDGE"
+    inputs {
+      (0: "Geometry") -> "St D1"(0: "Geometry"),
+      (2: "Name") = "mas_w1",
+      (3: "Value") -> "W1"(0: "Value"),
+    }
+  }
+
+  node "St W2" [GeometryNodeStoreNamedAttribute] @(3040, 200) {
+    domain = "EDGE"
+    inputs {
+      (0: "Geometry") -> "St W1"(0: "Geometry"),
+      (2: "Name") = "mas_w2",
+      (3: "Value") -> "W2"(0: "Value"),
+    }
+  }
+
+  // ---- split every base edge, weld back only the marked ends -------------
+
+  node "Split" [GeometryNodeSplitEdges] @(3280, 200) {
+    inputs {
+      (0: "Mesh") -> "St W2"(0: "Geometry"),
+    }
+  }
+
+  node "S E" [GeometryNodeEdgesOfVertex] @(3280, -300) {
+    inputs {
+      (0: "Vertex Index") -> "V Idx"(0: "Index"),
+    }
+  }
+
+  node "R W1" [GeometryNodeInputNamedAttribute] @(3280, -420) {
+    inputs {
+      (0: "Name") = "mas_w1",
+    }
+  }
+
+  node "R W2" [GeometryNodeInputNamedAttribute] @(3280, -540) {
+    inputs {
+      (0: "Name") = "mas_w2",
+    }
+  }
+
+  node "S W1" [GeometryNodeSampleIndex] @(3520, -420) {
+    domain = "EDGE"
+    inputs {
+      (0: "Geometry") -> "Split"(0: "Mesh"),
+      (1: "Value") -> "R W1"(0: "Attribute"),
+      (2: "Index") -> "S E"(0: "Edge Index"),
+    }
+  }
+
+  node "S W2" [GeometryNodeSampleIndex] @(3520, -540) {
+    domain = "EDGE"
+    inputs {
+      (0: "Geometry") -> "Split"(0: "Mesh"),
+      (1: "Value") -> "R W2"(0: "Attribute"),
+      (2: "Index") -> "S E"(0: "Edge Index"),
+    }
+  }
+
+  node "S V1" [GeometryNodeSampleIndex] @(3520, -660) {
+    data_type = "INT"
+    domain = "EDGE"
+    inputs {
+      (0: "Geometry") -> "Split"(0: "Mesh"),
+      (1: "Value") -> "E Verts"(0: "Vertex Index 1"),
+      (2: "Index") -> "S E"(0: "Edge Index"),
+    }
+  }
+
+  expr<float> "S Weld" @(3760, -500) {
+    expression = "w1 + (1.0 - compare(v1, i, 0.5)) * (w2 - w1)"
+    inputs {
+      "w1" -> "S W1"(0: "Value"),
+      "w2" -> "S W2"(0: "Value"),
+      "v1" -> "S V1"(0: "Value"),
+      "i" -> "V Idx"(0: "Index"),
+    }
+  }
+
+  expr<float> "S Weld Sel" @(4000, -500) {
+    expression = "greater_than(w, 0.5)"
+    inputs {
+      "w" -> "S Weld"(0: "Value"),
+    }
+  }
+
+  node "Merge" [GeometryNodeMergeByDistance] @(4240, 200) {
+    inputs {
+      (0: "Geometry") -> "Split"(0: "Mesh"),
+      (1: "Selection") -> "S Weld Sel"(0: "Value"),
+      (3: "Distance") = 0.0001,
+    }
+  }
+
+  node "To Curve" [GeometryNodeMeshToCurve] @(4480, 200) {
+    inputs {
+      (0: "Mesh") -> "Merge"(0: "Geometry"),
+    }
+  }
+
+  // ---- whose turn it is at each junction ---------------------------------
+  //
+  // The two panel ends that meet at a corner kept the same mas_vid, so
+  // counting how many earlier points share it names one of them first. That
+  // is the whole quoin alternation: first owns the even courses.
+
+  node "R Vid" [GeometryNodeInputNamedAttribute] @(4480, -300) {
+    data_type = "INT"
+    inputs {
+      (0: "Name") = "mas_vid",
+    }
+  }
+
+  node "Rank" [GeometryNodeAccumulateField] @(4720, -300) {
+    data_type = "INT"
+    inputs {
+      (0: "Value") = 1,
+      (1: "Group ID") -> "R Vid"(0: "Attribute"),
+    }
+  }
+
+  expr<float> "Own" @(4960, -300) {
+    expression = "compare(t, 0.0, 0.5)"
+    inputs {
+      "t" -> "Rank"(1: "Trailing"),
+    }
+  }
+
+  node "St Own" [GeometryNodeStoreNamedAttribute] @(4960, 200) {
+    inputs {
+      (0: "Geometry") -> "To Curve"(0: "Geometry"),
+      (2: "Name") = "mas_own",
+      (3: "Value") -> "Own"(0: "Value"),
+    }
+  }
+
+  node "Size" [GeometryNodeAttributeDomainSize] @(4960, 500) {
+    component = "CURVE"
+    inputs {
+      (0: "Geometry") -> "To Curve"(0: "Geometry"),
+    }
+  }
+
+  node "Group Output" [NodeGroupOutput] @(5240, 200) {
+    inputs {
+      ("Panels") -> "St Own"(0: "Geometry"),
+      ("Count") -> "Size"(4: "Spline Count"),
+      ("Base") -> "Z Stat"(3: "Min"),
+      ("Top") -> "Z Stat"(4: "Max"),
+    }
+  }
+}

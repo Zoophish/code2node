@@ -794,14 +794,25 @@ def _create_links(link_defs: list[LinkDef], node_map: dict, node_tree) -> list[s
     return warnings
 
 
-def _set_frame_parents(tree_def: TreeDef, node_map: dict):
-    for node_def in tree_def.nodes:
-        if node_def.children and node_def.name in node_map:
-            frame = node_map[node_def.name]
-            for child_name in node_def.children:
-                child = node_map.get(child_name)
-                if child is not None:
-                    child.parent = frame
+def _build_nodes(node_defs: list[NodeDef], node_tree, existing_trees: dict,
+                 node_map: dict) -> list[str]:
+    warnings: list[str] = []
+    for node_def in node_defs:
+        node, w = _build_node(node_def, node_tree, existing_trees)
+        warnings.extend(w)
+        node_map[node_def.name] = node
+
+    for node_def in node_defs:
+        for child_name in node_def.children:
+            child = node_map.get(child_name)
+            if child is not None:
+                child.parent = node_map[node_def.name]
+
+    # Frame children take frame-relative coordinates, so locate after parenting.
+    for node_def in node_defs:
+        node_map[node_def.name].location = node_def.location
+
+    return warnings
 
 
 _SHORT_TYPE_IRREGULAR = {'NodeSocketBool': 'BOOLEAN', 'NodeSocketColor': 'RGBA'}
@@ -825,12 +836,7 @@ def _short_socket_type(socket_idname: str) -> str:
 def _build_zone_body(zone_def: ZoneDef, pseudo: str, src_offset: int,
                      input_node, output_node, node_tree, node_map: dict,
                      existing_trees: dict) -> list[str]:
-    warnings: list[str] = []
-
-    for node_def in zone_def.nodes:
-        node, w = _build_node(node_def, node_tree, existing_trees)
-        warnings.extend(w)
-        node_map[node_def.name] = node
+    warnings = _build_nodes(zone_def.nodes, node_tree, existing_trees, node_map)
 
     scope = dict(node_map)
     scope[pseudo] = input_node
@@ -880,18 +886,11 @@ def _build_zone_body(zone_def: ZoneDef, pseudo: str, src_offset: int,
     return warnings
 
 
-def _repeat_pair_types(tree_idname: str) -> tuple[str, str]:
-    prefix = 'ShaderNode' if tree_idname.startswith('ShaderNode') else 'GeometryNode'
-    return prefix + 'RepeatInput', prefix + 'RepeatOutput'
-
-
 def _build_repeat_zone(zone_def: RepeatZoneDef, node_tree, node_map: dict,
                        existing_trees: dict) -> list[str]:
-    input_type, output_type = _repeat_pair_types(node_tree.bl_idname)
-    input_node = node_tree.nodes.new(input_type)
-    output_node = node_tree.nodes.new(output_type)
+    input_node = node_tree.nodes.new('GeometryNodeRepeatInput')  #NOTE: this will probably break in the future
+    output_node = node_tree.nodes.new('GeometryNodeRepeatOutput')
     input_node.pair_with_output(output_node)
-
 
     input_node.name = zone_def.name
     input_node.location = zone_def.location
@@ -991,28 +990,13 @@ def _fill_tree(tree_def: TreeDef, node_tree, existing_trees: dict) -> list[str]:
     _build_interface(node_tree, tree_def.interface)
 
     node_map = {}
-    for node_def in tree_def.nodes:
-        node, w = _build_node(node_def, node_tree, existing_trees)
-        warnings.extend(w)
-        node_map[node_def.name] = node
+    warnings.extend(_build_nodes(tree_def.nodes, node_tree, existing_trees,
+                                 node_map))
 
     for zone_def in tree_def.zones:
         build = _build_closure_zone if isinstance(zone_def, ClosureZoneDef) \
             else _build_repeat_zone
         warnings.extend(build(zone_def, node_tree, node_map, existing_trees))
-
-    _set_frame_parents(tree_def, node_map)
-
-    # Set locations after parents (frame-relative coordinates)
-    for node_def in tree_def.nodes:
-        node = node_map.get(node_def.name)
-        if node is not None:
-            node.location = node_def.location
-    for zone_def in tree_def.zones:
-        for node_def in zone_def.nodes:
-            node = node_map.get(node_def.name)
-            if node is not None:
-                node.location = node_def.location
 
     warnings.extend(_create_links(tree_def.links, node_map, node_tree))
 

@@ -64,7 +64,7 @@
               "include": "#tree-type"
             },
             {
-              "include": "#quoted-string"
+              "include": "#name-string"
             },
             {
               "include": "#bare-name"
@@ -108,7 +108,7 @@
         "2": {
           "patterns": [
             {
-              "include": "#quoted-string"
+              "include": "#name-string"
             },
             {
               "include": "#bare-name"
@@ -152,10 +152,13 @@
               "include": "#bl-idname"
             },
             {
+              "include": "#label-literal"
+            },
+            {
               "include": "#label-attr"
             },
             {
-              "include": "#quoted-string"
+              "include": "#name-string"
             },
             {
               "include": "#bare-name"
@@ -196,7 +199,7 @@
               "include": "#location-metadata"
             },
             {
-              "include": "#quoted-string"
+              "include": "#name-string"
             },
             {
               "include": "#bare-name"
@@ -271,7 +274,7 @@
         "2": {
           "patterns": [
             {
-              "include": "#quoted-string"
+              "include": "#name-string"
             },
             {
               "include": "#bare-name"
@@ -326,6 +329,21 @@
           "include": "#number"
         },
         {
+          "include": "#label-literal"
+        },
+        {
+          "include": "#node-tree-ref"
+        },
+        {
+          "include": "#socket-ref-name"
+        },
+        {
+          "include": "#node-ref-name"
+        },
+        {
+          "include": "#declared-name"
+        },
+        {
           "include": "#quoted-string"
         },
         {
@@ -346,6 +364,69 @@
     "quoted-string": {
       "match": "\"[^\"]*\"",
       "name": "string.quoted.double.blender-nodes"
+    },
+    "name-string": {
+      "match": "\"[^\"]*\"",
+      "name": "constant.other.symbol.blender-nodes"
+    },
+    "label-literal": {
+      "match": "\\b(label|description|expression)\\s*(=)\\s*(\"[^\"]*\")",
+      "captures": {
+        "1": {
+          "name": "support.variable.property.blender-nodes"
+        },
+        "2": {
+          "name": "keyword.operator.assignment.blender-nodes"
+        },
+        "3": {
+          "name": "string.quoted.double.blender-nodes"
+        }
+      }
+    },
+    "node-tree-ref": {
+      "match": "\\b(node_tree)\\s*(=)\\s*(\"[^\"]*\")",
+      "captures": {
+        "1": {
+          "name": "support.variable.property.blender-nodes"
+        },
+        "2": {
+          "name": "keyword.operator.assignment.blender-nodes"
+        },
+        "3": {
+          "name": "constant.other.symbol.blender-nodes"
+        }
+      }
+    },
+    "socket-ref-name": {
+      "patterns": [
+        {
+          "match": "(\\()\\s*(\\d+)\\s*(:)\\s*(\"[^\"]*\")",
+          "captures": {
+            "2": {
+              "name": "constant.numeric.blender-nodes"
+            },
+            "4": {
+              "name": "constant.other.symbol.blender-nodes"
+            }
+          }
+        },
+        {
+          "match": "\\(\\s*(\"[^\"]*\")\\s*(?=\\))",
+          "captures": {
+            "1": {
+              "name": "constant.other.symbol.blender-nodes"
+            }
+          }
+        }
+      ]
+    },
+    "node-ref-name": {
+      "match": "\"[^\"]*\"(?=\\s*\\()",
+      "name": "constant.other.symbol.blender-nodes"
+    },
+    "declared-name": {
+      "match": "\"[^\"]*\"(?=\\s*(->|[:=]))",
+      "name": "constant.other.symbol.blender-nodes"
     },
     "bare-name": {
       "match": "\\b[A-Za-z_][A-Za-z0-9_.]*\\b",
@@ -408,7 +489,7 @@
               "include": "#location-metadata"
             },
             {
-              "include": "#quoted-string"
+              "include": "#name-string"
             },
             {
               "include": "#bare-name"
@@ -452,10 +533,13 @@
               "include": "#location-metadata"
             },
             {
+              "include": "#label-literal"
+            },
+            {
               "include": "#label-attr"
             },
             {
-              "include": "#quoted-string"
+              "include": "#name-string"
             },
             {
               "include": "#bare-name"

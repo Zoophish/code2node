@@ -4,6 +4,13 @@
 
 Author Blender nodes as code instead of data files. Code2node is a library that serialises and compiles Blender node trees from a text based node language. It works with any node tree type that derives from Blender's `NodeTree`; i.e. shader, geometry, compositor, and custom tree types registered by other addons.
 
+## Examples
+
+| | | |
+|:---:|:---:|:---:|
+| <img src="./examples/masonry/masonry_example.jpg" width="420"> | <img src="./examples/spiral_staircase/spiral_staircase_example.jpg" width="240"> | <img src="./examples/thin_film/soap_film_example.jpg" width="240"> |
+| [**masonry**](./examples/masonry)<br>4,913 lines, 1,082 nodes<br>Created with Claude Opus 5 | [**spiral staircase**](./examples/spiral_staircase)<br>514 lines, 61 nodes<br>Created with Claude Opus 5 | [**thin film**](./examples/thin_film)<br>358 lines, 106 nodes<br>Created with Claude Opus 5 |
+
 ## Overview
 
 ### CLI
@@ -51,58 +58,6 @@ Install `code2node-<version>.zip` from the latest release.
 The `.nodes` syntax is fundamentally based on block definitions, similar to JSON, supporting arbitrary node
 types which are registered in the schema. It contains extras such as a preprocessor, expressions
 and compile time constructs to improve compactness and legibility.
-
-
-### Lexical elements
-
-**Keywords**
-
-| Keyword | Description |
-|---------|-------------|
-| `tree` | Declares a node tree |
-| `node` | Declares a node |
-| `frame` | Declares a frame |
-| `reroute` | Declares a reroute |
-| `repeat` | Declares a repeat zone |
-| `closure` | Declares a closure zone |
-| `expr` | Declares a formula, compiled to math nodes |
-| `import` | Imports trees from another module |
-| `inline` | Qualifies a declaration as compile time only, producing no datablock |
-| `interface` | Holds the `inputs`/`outputs` blocks of a tree's interface |
-| `inputs` | Lists input sockets of a node, `interface` or zone; bindings of an `expr` |
-| `outputs` | Lists output sockets, or a zone's result mappings |
-| `items` | Lists the values a `repeat` zone carries between iterations |
-| `children` | Lists the nodes a `frame` contains |
-
-**Syntax**
-
-| Form | Description |
-|------|---------|
-| `{ }` | Block body |
-| `[Type]` | Type identifier: a node type, or a socket type |
-| `<numeric type>` | Numeric type parameter, as on `expr<float>` |
-| `"..."` | Quoted string: the name of a declaration, or a string literal |
-| `(index)` | Socket by index |
-| `("Name")` | Socket by name |
-| `(index: "Name")` | Socket by index, annotated with the socket's name |
-| `->` | Connection, target on the left |
-| `=` | Literal value |
-| `@(x, y)` | Position, and optional size `w=` and `h=` |
-| `,` | Terminates entries in a block |
-| `:` | Binds a name to a type |
-| `.` | Separates module path segments in an `import` |
-| `//`, `/* */` | Comment to end of line, and block comment |
-| `#` | Preprocessor directive |
-
-**Literals**
-
-| Type | Examples | Description |
-|------|----------|-------|
-| Integer | `28`, `-4` | Digits with no point or exponent |
-| Float | `0.8`, `-2.5`, `1e3` | A point or an exponent makes it a float |
-| String | `"Base Color"` | Double quotes, with no escape sequences |
-| Boolean | `true`, `false` | |
-| Tuple | `(0.8, 0.8, 0.8, 1.0)` | Comma-separated values, for vectors and colours |
 
 ### Preprocessor
 
@@ -397,6 +352,58 @@ node "eval falloff" [NodeEvaluateClosure] {
   }
 }
 ```
+
+### Lexical elements
+
+**Keywords**
+
+| Keyword | Description |
+|---------|-------------|
+| `tree` | Declares a node tree |
+| `node` | Declares a node |
+| `frame` | Declares a frame |
+| `reroute` | Declares a reroute |
+| `repeat` | Declares a repeat zone |
+| `closure` | Declares a closure zone |
+| `expr` | Declares a formula, compiled to math nodes |
+| `import` | Imports trees from another module |
+| `inline` | Qualifies a declaration as compile time only, producing no datablock |
+| `interface` | Holds the `inputs`/`outputs` blocks of a tree's interface |
+| `inputs` | Lists input sockets of a node, `interface` or zone; bindings of an `expr` |
+| `outputs` | Lists output sockets, or a zone's result mappings |
+| `items` | Lists the values a `repeat` zone carries between iterations |
+| `children` | Lists the nodes a `frame` contains |
+
+**Syntax**
+
+| Form | Description |
+|------|---------|
+| `{ }` | Block body |
+| `[Type]` | Type identifier: a node type, or a socket type |
+| `<numeric type>` | Numeric type parameter, as on `expr<float>` |
+| `"..."` | Quoted string: the name of a declaration, or a string literal |
+| `(index)` | Socket by index |
+| `("Name")` | Socket by name |
+| `(index: "Name")` | Socket by index, annotated with the socket's name |
+| `->` | Connection, target on the left |
+| `=` | Literal value |
+| `@(x, y)` | Position, and optional size `w=` and `h=` |
+| `,` | Terminates entries in a block |
+| `:` | Binds a name to a type |
+| `.` | Separates module path segments in an `import` |
+| `//`, `/* */` | Comment to end of line, and block comment |
+| `#` | Preprocessor directive |
+
+**Literals**
+
+| Type | Examples | Description |
+|------|----------|-------|
+| Integer | `28`, `-4` | Digits with no point or exponent |
+| Float | `0.8`, `-2.5`, `1e3` | A point or an exponent makes it a float |
+| String | `"Base Color"` | Double quotes, with no escape sequences |
+| Boolean | `true`, `false` | |
+| Tuple | `(0.8, 0.8, 0.8, 1.0)` | Comma-separated values, for vectors and colours |
+
 
 ## Schema Output
 

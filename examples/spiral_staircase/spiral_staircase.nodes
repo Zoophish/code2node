@@ -1,0 +1,514 @@
+// nodelib/spiral_staircase.nodes
+//
+// Parametric spiral staircase. Self-contained geometry node group: drop it on
+// any object as a Geometry Nodes modifier and set the inputs. Incoming
+// geometry is passed through and joined, so it is safe on a non-empty object.
+//
+// Frame of reference: the helix axis is the object's local +Z, the first tread
+// starts at angle 0 (local +X) and the stair climbs counter-clockwise.
+//
+// Geometry contract (what the checks in the accompanying test assert):
+//   rise            = Total Height / Step Count
+//   step angle      = Total Rotation / Step Count
+//   tread i (0..N-1) top face at z = (i+1)*rise, angle i*step angle
+//   handrail centre passes exactly Handrail Height above every tread top
+//   balusters are therefore all the same length (Handrail Height)
+//
+// Requires Tread Thickness < rise, otherwise consecutive treads intersect.
+
+tree "Spiral Staircase" [GeometryNodeTree] {
+  interface {
+    inputs {
+      "Geometry": [NodeSocketGeometry],
+      "Step Count": [NodeSocketInt] = 16,
+      "Total Height": [NodeSocketFloat] = 3.0,
+      "Total Rotation": [NodeSocketFloat] = 6.2831855,
+      "Inner Radius": [NodeSocketFloat] = 0.1,
+      "Outer Radius": [NodeSocketFloat] = 1.2,
+      "Pole Radius": [NodeSocketFloat] = 0.12,
+      "Tread Thickness": [NodeSocketFloat] = 0.05,
+      "Tread Fill": [NodeSocketFloat] = 0.96,
+      "Tread Segments": [NodeSocketInt] = 8,
+      "Handrail Height": [NodeSocketFloat] = 0.95,
+      "Handrail Radius": [NodeSocketFloat] = 0.025,
+      "Handrail Inset": [NodeSocketFloat] = 0.08,
+      "Baluster Radius": [NodeSocketFloat] = 0.015,
+      "Balusters": [NodeSocketBool] = true,
+      "Rail Segments Per Step": [NodeSocketInt] = 6,
+    }
+    outputs {
+      "Geometry": [NodeSocketGeometry],
+    }
+  }
+
+  node "Group Input" [NodeGroupInput] @(-1400, 0) {
+  }
+
+  // ---- derived quantities -------------------------------------------------
+
+  node "Rise" [ShaderNodeMath] @(-1160, 300) {
+    operation = "DIVIDE"
+    inputs {
+      (0: "Value") -> "Group Input"(2: "Total Height"),
+      (1: "Value") -> "Group Input"(1: "Step Count"),
+    }
+  }
+
+  node "Step Angle" [ShaderNodeMath] @(-1160, 160) {
+    operation = "DIVIDE"
+    inputs {
+      (0: "Value") -> "Group Input"(3: "Total Rotation"),
+      (1: "Value") -> "Group Input"(1: "Step Count"),
+    }
+  }
+
+  node "Rail Radius" [ShaderNodeMath] @(-1160, 20) {
+    operation = "SUBTRACT"
+    inputs {
+      (0: "Value") -> "Group Input"(5: "Outer Radius"),
+      (1: "Value") -> "Group Input"(12: "Handrail Inset"),
+    }
+  }
+
+  node "Radial Span" [ShaderNodeMath] @(-1160, -120) {
+    operation = "SUBTRACT"
+    inputs {
+      (0: "Value") -> "Group Input"(5: "Outer Radius"),
+      (1: "Value") -> "Group Input"(4: "Inner Radius"),
+    }
+  }
+
+  // ---- one tread, built flat at the origin --------------------------------
+  // A 1x1 grid is bent into an annular sector: grid x in [-0.5, 0.5] maps to
+  // radius, grid y in [-0.5, 0.5] maps to the swept angle.
+
+  node "Tread Rings" [ShaderNodeMath] @(-1160, -260) {
+    operation = "ADD"
+    inputs {
+      (0: "Value") -> "Group Input"(9: "Tread Segments"),
+      (1: "Value") = 1.0,
+    }
+  }
+
+  node "Tread Grid" [GeometryNodeMeshGrid] @(-940, -260) {
+    inputs {
+      (2: "Vertices X") = 2,
+      (3: "Vertices Y") -> "Tread Rings"(0: "Value"),
+    }
+  }
+
+  node "Grid Position" [GeometryNodeInputPosition] @(-1160, -420) {
+  }
+
+  node "Grid UV" [ShaderNodeSeparateXYZ] @(-980, -420) {
+    inputs {
+      (0: "Vector") -> "Grid Position"(0: "Position"),
+    }
+  }
+
+  node "Tread U" [ShaderNodeMath] @(-800, -420) {
+    operation = "ADD"
+    inputs {
+      (0: "Value") -> "Grid UV"(0: "X"),
+      (1: "Value") = 0.5,
+    }
+  }
+
+  node "Tread Radius" [ShaderNodeMath] @(-620, -420) {
+    operation = "MULTIPLY_ADD"
+    inputs {
+      (0: "Value") -> "Tread U"(0: "Value"),
+      (1: "Value") -> "Radial Span"(0: "Value"),
+      (2: "Value") -> "Group Input"(4: "Inner Radius"),
+    }
+  }
+
+  node "Tread Sweep" [ShaderNodeMath] @(-800, -560) {
+    operation = "MULTIPLY"
+    inputs {
+      (0: "Value") -> "Step Angle"(0: "Value"),
+      (1: "Value") -> "Group Input"(8: "Tread Fill"),
+    }
+  }
+
+  node "Tread Angle" [ShaderNodeMath] @(-620, -560) {
+    operation = "MULTIPLY"
+    inputs {
+      (0: "Value") -> "Grid UV"(1: "Y"),
+      (1: "Value") -> "Tread Sweep"(0: "Value"),
+    }
+  }
+
+  node "Tread Cos" [ShaderNodeMath] @(-440, -480) {
+    operation = "COSINE"
+    inputs {
+      (0: "Value") -> "Tread Angle"(0: "Value"),
+    }
+  }
+
+  node "Tread Sin" [ShaderNodeMath] @(-440, -620) {
+    operation = "SINE"
+    inputs {
+      (0: "Value") -> "Tread Angle"(0: "Value"),
+    }
+  }
+
+  node "Tread X" [ShaderNodeMath] @(-260, -480) {
+    operation = "MULTIPLY"
+    inputs {
+      (0: "Value") -> "Tread Radius"(0: "Value"),
+      (1: "Value") -> "Tread Cos"(0: "Value"),
+    }
+  }
+
+  node "Tread Y" [ShaderNodeMath] @(-260, -620) {
+    operation = "MULTIPLY"
+    inputs {
+      (0: "Value") -> "Tread Radius"(0: "Value"),
+      (1: "Value") -> "Tread Sin"(0: "Value"),
+    }
+  }
+
+  node "Tread Polar" [ShaderNodeCombineXYZ] @(-80, -560) {
+    inputs {
+      (0: "X") -> "Tread X"(0: "Value"),
+      (1: "Y") -> "Tread Y"(0: "Value"),
+    }
+  }
+
+  node "Tread Flat" [GeometryNodeSetPosition] @(100, -260) {
+    inputs {
+      (0: "Geometry") -> "Tread Grid"(0: "Mesh"),
+      (2: "Position") -> "Tread Polar"(0: "Vector"),
+    }
+  }
+
+  // Extrude Mesh consumes the faces it extrudes, so the sector is extruded
+  // downward and the original flat sector is joined back on as the top face,
+  // then welded. Note the Offset must be *linked*: an unconnected Offset makes
+  // the node fall back to extruding along the face normal.
+
+  node "Tread Drop" [ShaderNodeMath] @(100, -700) {
+    operation = "MULTIPLY"
+    inputs {
+      (0: "Value") -> "Group Input"(7: "Tread Thickness"),
+      (1: "Value") = -1.0,
+    }
+  }
+
+  node "Tread Offset" [ShaderNodeCombineXYZ] @(280, -700) {
+    inputs {
+      (2: "Z") -> "Tread Drop"(0: "Value"),
+    }
+  }
+
+  node "Tread Walls" [GeometryNodeExtrudeMesh] @(300, -260) {
+    mode = "FACES"
+    inputs {
+      (0: "Mesh") -> "Tread Flat"(0: "Geometry"),
+      (2: "Offset") -> "Tread Offset"(0: "Vector"),
+      (4: "Individual") = false,
+    }
+  }
+
+  node "Tread Capped" [GeometryNodeJoinGeometry] @(500, -260) {
+    inputs {
+      (0: "Geometry") -> "Tread Walls"(0: "Mesh"),
+      (0: "Geometry") -> "Tread Flat"(0: "Geometry"),
+    }
+  }
+
+  node "Tread Solid" [GeometryNodeMergeByDistance] @(680, -260) {
+    inputs {
+      (0: "Geometry") -> "Tread Capped"(0: "Geometry"),
+      (3: "Distance") = 1e-05,
+    }
+  }
+
+  // ---- the helix of step positions ----------------------------------------
+  // Point i sits on the stair axis at z = (i+1)*rise and carries the rotation
+  // i*step angle. Both the treads and the balusters instance onto it.
+
+  node "Step Offset" [ShaderNodeCombineXYZ] @(-940, 300) {
+    inputs {
+      (2: "Z") -> "Rise"(0: "Value"),
+    }
+  }
+
+  node "Step Points" [GeometryNodeMeshLine] @(-760, 300) {
+    mode = "OFFSET"
+    count_mode = "TOTAL"
+    inputs {
+      (0: "Count") -> "Group Input"(1: "Step Count"),
+      (2: "Start Location") -> "Step Offset"(0: "Vector"),
+      (3: "Offset") -> "Step Offset"(0: "Vector"),
+    }
+  }
+
+  node "Step Index" [GeometryNodeInputIndex] @(-940, 160) {
+  }
+
+  node "Point Angle" [ShaderNodeMath] @(-760, 160) {
+    operation = "MULTIPLY"
+    inputs {
+      (0: "Value") -> "Step Index"(0: "Index"),
+      (1: "Value") -> "Step Angle"(0: "Value"),
+    }
+  }
+
+  node "Point Euler" [ShaderNodeCombineXYZ] @(-580, 160) {
+    inputs {
+      (2: "Z") -> "Point Angle"(0: "Value"),
+    }
+  }
+
+  node "Point Rotation" [FunctionNodeEulerToRotation] @(-400, 160) {
+    inputs {
+      (0: "Euler") -> "Point Euler"(0: "Vector"),
+    }
+  }
+
+  node "Treads" [GeometryNodeInstanceOnPoints] @(880, 100) {
+    inputs {
+      (0: "Points") -> "Step Points"(0: "Mesh"),
+      (2: "Instance") -> "Tread Solid"(0: "Geometry"),
+      (5: "Rotation") -> "Point Rotation"(0: "Rotation"),
+    }
+  }
+
+  // ---- centre pole --------------------------------------------------------
+
+  node "Pole Z" [ShaderNodeMath] @(-940, 460) {
+    operation = "MULTIPLY"
+    inputs {
+      (0: "Value") -> "Group Input"(2: "Total Height"),
+      (1: "Value") = 0.5,
+    }
+  }
+
+  node "Pole Offset" [ShaderNodeCombineXYZ] @(-760, 460) {
+    inputs {
+      (2: "Z") -> "Pole Z"(0: "Value"),
+    }
+  }
+
+  node "Pole" [GeometryNodeMeshCylinder] @(-760, 640) {
+    inputs {
+      (0: "Vertices") = 24,
+      (3: "Radius") -> "Group Input"(6: "Pole Radius"),
+      (4: "Depth") -> "Group Input"(2: "Total Height"),
+    }
+  }
+
+  node "Pole Placed" [GeometryNodeTransform] @(-460, 600) {
+    inputs {
+      (0: "Geometry") -> "Pole"(0: "Mesh"),
+      (2: "Translation") -> "Pole Offset"(0: "Vector"),
+    }
+  }
+
+  // ---- handrail -----------------------------------------------------------
+  // A unit line resampled to N*res+1 points, then pushed onto the same helix
+  // the treads follow, offset one rise + Handrail Height up. At the angle of
+  // tread i the rail centre is therefore exactly Handrail Height above that
+  // tread's top face.
+
+  node "Rail Denom" [ShaderNodeMath] @(-1160, 900) {
+    operation = "MULTIPLY"
+    inputs {
+      (0: "Value") -> "Group Input"(1: "Step Count"),
+      (1: "Value") -> "Group Input"(15: "Rail Segments Per Step"),
+    }
+  }
+
+  node "Rail Count" [ShaderNodeMath] @(-980, 900) {
+    operation = "ADD"
+    inputs {
+      (0: "Value") -> "Rail Denom"(0: "Value"),
+      (1: "Value") = 1.0,
+    }
+  }
+
+  node "Rail Line" [GeometryNodeCurvePrimitiveLine] @(-980, 1060) {
+    mode = "POINTS"
+  }
+
+  node "Rail Samples" [GeometryNodeResampleCurve] @(-760, 1060) {
+    inputs {
+      (0: "Curve") -> "Rail Line"(0: "Curve"),
+      (3: "Count") -> "Rail Count"(0: "Value"),
+    }
+  }
+
+  node "Rail Index" [GeometryNodeInputIndex] @(-980, 780) {
+  }
+
+  node "Rail U" [ShaderNodeMath] @(-800, 780) {
+    operation = "DIVIDE"
+    inputs {
+      (0: "Value") -> "Rail Index"(0: "Index"),
+      (1: "Value") -> "Rail Denom"(0: "Value"),
+    }
+  }
+
+  node "Rail Angle" [ShaderNodeMath] @(-620, 780) {
+    operation = "MULTIPLY"
+    inputs {
+      (0: "Value") -> "Rail U"(0: "Value"),
+      (1: "Value") -> "Group Input"(3: "Total Rotation"),
+    }
+  }
+
+  node "Rail Base" [ShaderNodeMath] @(-620, 640) {
+    operation = "ADD"
+    inputs {
+      (0: "Value") -> "Rise"(0: "Value"),
+      (1: "Value") -> "Group Input"(10: "Handrail Height"),
+    }
+  }
+
+  node "Rail Z" [ShaderNodeMath] @(-440, 640) {
+    operation = "MULTIPLY_ADD"
+    inputs {
+      (0: "Value") -> "Rail U"(0: "Value"),
+      (1: "Value") -> "Group Input"(2: "Total Height"),
+      (2: "Value") -> "Rail Base"(0: "Value"),
+    }
+  }
+
+  node "Rail Cos" [ShaderNodeMath] @(-440, 900) {
+    operation = "COSINE"
+    inputs {
+      (0: "Value") -> "Rail Angle"(0: "Value"),
+    }
+  }
+
+  node "Rail Sin" [ShaderNodeMath] @(-440, 780) {
+    operation = "SINE"
+    inputs {
+      (0: "Value") -> "Rail Angle"(0: "Value"),
+    }
+  }
+
+  node "Rail X" [ShaderNodeMath] @(-260, 900) {
+    operation = "MULTIPLY"
+    inputs {
+      (0: "Value") -> "Rail Radius"(0: "Value"),
+      (1: "Value") -> "Rail Cos"(0: "Value"),
+    }
+  }
+
+  node "Rail Y" [ShaderNodeMath] @(-260, 780) {
+    operation = "MULTIPLY"
+    inputs {
+      (0: "Value") -> "Rail Radius"(0: "Value"),
+      (1: "Value") -> "Rail Sin"(0: "Value"),
+    }
+  }
+
+  node "Rail Point" [ShaderNodeCombineXYZ] @(-80, 840) {
+    inputs {
+      (0: "X") -> "Rail X"(0: "Value"),
+      (1: "Y") -> "Rail Y"(0: "Value"),
+      (2: "Z") -> "Rail Z"(0: "Value"),
+    }
+  }
+
+  node "Rail Curve" [GeometryNodeSetPosition] @(120, 1060) {
+    inputs {
+      (0: "Geometry") -> "Rail Samples"(0: "Curve"),
+      (2: "Position") -> "Rail Point"(0: "Vector"),
+    }
+  }
+
+  node "Rail Profile" [GeometryNodeCurvePrimitiveCircle] @(120, 1240) {
+    mode = "RADIUS"
+    inputs {
+      (0: "Resolution") = 8,
+      (4: "Radius") -> "Group Input"(11: "Handrail Radius"),
+    }
+  }
+
+  node "Handrail" [GeometryNodeCurveToMesh] @(340, 1060) {
+    inputs {
+      (0: "Curve") -> "Rail Curve"(0: "Geometry"),
+      (1: "Profile Curve") -> "Rail Profile"(0: "Curve"),
+      (3: "Fill Caps") = true,
+    }
+  }
+
+  // ---- balusters ----------------------------------------------------------
+  // Because the rail keeps a constant height above each tread, every baluster
+  // is the same length: one cylinder, offset to the rail radius, instanced on
+  // the same helix points as the treads.
+
+  node "Baluster Z" [ShaderNodeMath] @(-940, -700) {
+    operation = "MULTIPLY"
+    inputs {
+      (0: "Value") -> "Group Input"(10: "Handrail Height"),
+      (1: "Value") = 0.5,
+    }
+  }
+
+  node "Baluster Offset" [ShaderNodeCombineXYZ] @(-760, -700) {
+    inputs {
+      (0: "X") -> "Rail Radius"(0: "Value"),
+      (2: "Z") -> "Baluster Z"(0: "Value"),
+    }
+  }
+
+  node "Baluster Bar" [GeometryNodeMeshCylinder] @(-760, -880) {
+    inputs {
+      (0: "Vertices") = 8,
+      (3: "Radius") -> "Group Input"(13: "Baluster Radius"),
+      (4: "Depth") -> "Group Input"(10: "Handrail Height"),
+    }
+  }
+
+  node "Baluster Placed" [GeometryNodeTransform] @(-460, -800) {
+    inputs {
+      (0: "Geometry") -> "Baluster Bar"(0: "Mesh"),
+      (2: "Translation") -> "Baluster Offset"(0: "Vector"),
+    }
+  }
+
+  node "Balusters" [GeometryNodeInstanceOnPoints] @(560, -800) {
+    inputs {
+      (0: "Points") -> "Step Points"(0: "Mesh"),
+      (2: "Instance") -> "Baluster Placed"(0: "Geometry"),
+      (5: "Rotation") -> "Point Rotation"(0: "Rotation"),
+    }
+  }
+
+  node "Baluster Switch" [GeometryNodeSwitch] @(760, -800) {
+    input_type = "GEOMETRY"
+    inputs {
+      (0: "Switch") -> "Group Input"(14: "Balusters"),
+      (2: "True") -> "Balusters"(0: "Instances"),
+    }
+  }
+
+  // ---- assemble -----------------------------------------------------------
+
+  node "Assemble" [GeometryNodeJoinGeometry] @(1000, 200) {
+    inputs {
+      (0: "Geometry") -> "Group Input"(0: "Geometry"),
+      (0: "Geometry") -> "Pole Placed"(0: "Geometry"),
+      (0: "Geometry") -> "Treads"(0: "Instances"),
+      (0: "Geometry") -> "Handrail"(0: "Mesh"),
+      (0: "Geometry") -> "Baluster Switch"(0: "Output"),
+    }
+  }
+
+  node "Realize" [GeometryNodeRealizeInstances] @(1200, 200) {
+    inputs {
+      (0: "Geometry") -> "Assemble"(0: "Geometry"),
+    }
+  }
+
+  node "Group Output" [NodeGroupOutput] @(1400, 200) {
+    inputs {
+      (0: "Geometry") -> "Realize"(0: "Geometry"),
+    }
+  }
+}

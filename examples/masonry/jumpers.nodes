@@ -1,0 +1,257 @@
+// jumpers.nodes — let a tall stone eat into the course above it.
+//
+// A jumper is a stone that spans two courses. The course above has already
+// been laid out as if the jumper were not there, so its stones have to give
+// way: each one looks below itself, and if a jumper is in the way it either
+// butts against it or, if the jumper swallows it whole, dies.
+//
+// The lookup is a nearest-point query in a fake plane where x is the stone's
+// position along its run and y is its course number times a large stride, so
+// "nearest" can only ever find a stone in the neighbouring course. One pass
+// probes one point along the stone, so a stone overlapped by two different
+// jumpers needs a pass per probe point — the wall tool runs three.
+//
+// Reads and writes mas_u0, mas_u1 and mas_act on the grid; reads mas_jmp,
+// mas_odd and mas_key. Both clouds must carry all six.
+
+tree "mas Jumper Clamp" [GeometryNodeTree] {
+  interface {
+    inputs {
+      "Grid": [NodeSocketGeometry],
+      "Jumpers": [NodeSocketGeometry],
+      "Min Width": [NodeSocketFloat] = 0.05,
+      "Probe": [NodeSocketFloat] = 0.5,
+    }
+    outputs {
+      "Grid": [NodeSocketGeometry],
+    }
+  }
+
+  node "Group Input" [NodeGroupInput] @(-1200, 0) {
+  }
+
+  node "U0" [GeometryNodeInputNamedAttribute] @(-1200, -240) {
+    inputs {
+      (0: "Name") = "mas_u0",
+    }
+  }
+
+  node "U1" [GeometryNodeInputNamedAttribute] @(-1200, -360) {
+    inputs {
+      (0: "Name") = "mas_u1",
+    }
+  }
+
+  node "Act" [GeometryNodeInputNamedAttribute] @(-1200, -480) {
+    data_type = "BOOLEAN"
+    inputs {
+      (0: "Name") = "mas_act",
+    }
+  }
+
+  node "Jmp" [GeometryNodeInputNamedAttribute] @(-1200, -600) {
+    data_type = "BOOLEAN"
+    inputs {
+      (0: "Name") = "mas_jmp",
+    }
+  }
+
+  node "Odd" [GeometryNodeInputNamedAttribute] @(-1200, -720) {
+    data_type = "BOOLEAN"
+    inputs {
+      (0: "Name") = "mas_odd",
+    }
+  }
+
+  node "Key" [GeometryNodeInputNamedAttribute] @(-1200, -840) {
+    data_type = "INT"
+    inputs {
+      (0: "Name") = "mas_key",
+    }
+  }
+
+  // ---- look one course down, at one point along this stone ---------------
+
+  expr<float> "Probe U" @(-940, -300) {
+    expression = "u0 + p * (u1 - u0)"
+    inputs {
+      "u0" -> "U0"(0: "Attribute"),
+      "u1" -> "U1"(0: "Attribute"),
+      "p" -> "Group Input"("Probe"),
+    }
+  }
+
+  expr<float> "Below" @(-940, -840) {
+    expression = "(k - 1.0) * 1000.0"
+    inputs {
+      "k" -> "Key"(0: "Attribute"),
+    }
+  }
+
+  node "Probe At" [ShaderNodeCombineXYZ] @(-700, -560) {
+    inputs {
+      (0: "X") -> "Probe U"(0: "Value"),
+      (1: "Y") -> "Below"(0: "Value"),
+    }
+  }
+
+  node "Near" [GeometryNodeSampleNearest] @(-460, -560) {
+    inputs {
+      (0: "Geometry") -> "Group Input"("Jumpers"),
+      (1: "Sample Position") -> "Probe At"(0: "Vector"),
+    }
+  }
+
+  node "J U0" [GeometryNodeSampleIndex] @(-220, -400) {
+    inputs {
+      (0: "Geometry") -> "Group Input"("Jumpers"),
+      (1: "Value") -> "U0"(0: "Attribute"),
+      (2: "Index") -> "Near"(0: "Index"),
+    }
+  }
+
+  node "J U1" [GeometryNodeSampleIndex] @(-220, -560) {
+    inputs {
+      (0: "Geometry") -> "Group Input"("Jumpers"),
+      (1: "Value") -> "U1"(0: "Attribute"),
+      (2: "Index") -> "Near"(0: "Index"),
+    }
+  }
+
+  node "J Key" [GeometryNodeSampleIndex] @(-220, -720) {
+    data_type = "INT"
+    inputs {
+      (0: "Geometry") -> "Group Input"("Jumpers"),
+      (1: "Value") -> "Key"(0: "Attribute"),
+      (2: "Index") -> "Near"(0: "Index"),
+    }
+  }
+
+  // ---- is it really below me, and does it reach into my slot? ------------
+  //
+  // The comparisons are strict so that the empty-jumper-cloud fallback, which
+  // samples a zero-width interval at the origin, can never overlap anything.
+
+  expr<float> "Valid" @(40, -600) {
+    expression = "compare(jk, k - 1.0, 0.5) * act * odd * (1.0 - jmp)"
+    inputs {
+      "jk" -> "J Key"(0: "Value"),
+      "k" -> "Key"(0: "Attribute"),
+      "act" -> "Act"(0: "Attribute"),
+      "odd" -> "Odd"(0: "Attribute"),
+      "jmp" -> "Jmp"(0: "Attribute"),
+    }
+  }
+
+  expr<float> "Overlap" @(280, -600) {
+    expression = "valid * less_than(u0, ju1) * less_than(ju0, u1)"
+    inputs {
+      "valid" -> "Valid"(0: "Value"),
+      "u0" -> "U0"(0: "Attribute"),
+      "u1" -> "U1"(0: "Attribute"),
+      "ju0" -> "J U0"(0: "Value"),
+      "ju1" -> "J U1"(0: "Value"),
+    }
+  }
+
+  expr<float> "Swallowed" @(520, -600) {
+    expression =
+      "ov * (1.0 - less_than(u0, ju0 - m)) * (1.0 - greater_than(u1, ju1 + m))"
+    inputs {
+      "ov" -> "Overlap"(0: "Value"),
+      "u0" -> "U0"(0: "Attribute"),
+      "u1" -> "U1"(0: "Attribute"),
+      "ju0" -> "J U0"(0: "Value"),
+      "ju1" -> "J U1"(0: "Value"),
+      "m" -> "Group Input"("Min Width"),
+    }
+  }
+
+  // keep whichever side of the jumper sticks out further and butt it up
+
+  expr<float> "Trim Left" @(520, -840) {
+    expression = "ov * (1.0 - sw) * (1.0 - greater_than(ju0 - u0, u1 - ju1))"
+    inputs {
+      "ov" -> "Overlap"(0: "Value"),
+      "sw" -> "Swallowed"(0: "Value"),
+      "u0" -> "U0"(0: "Attribute"),
+      "u1" -> "U1"(0: "Attribute"),
+      "ju0" -> "J U0"(0: "Value"),
+      "ju1" -> "J U1"(0: "Value"),
+    }
+  }
+
+  expr<float> "Trim Right" @(520, -960) {
+    expression = "ov * (1.0 - sw) * greater_than(ju0 - u0, u1 - ju1)"
+    inputs {
+      "ov" -> "Overlap"(0: "Value"),
+      "sw" -> "Swallowed"(0: "Value"),
+      "u0" -> "U0"(0: "Attribute"),
+      "u1" -> "U1"(0: "Attribute"),
+      "ju0" -> "J U0"(0: "Value"),
+      "ju1" -> "J U1"(0: "Value"),
+    }
+  }
+
+  expr<float> "New U0" @(760, -840) {
+    expression = "u0 + tl * (max(u0, ju1) - u0)"
+    inputs {
+      "u0" -> "U0"(0: "Attribute"),
+      "ju1" -> "J U1"(0: "Value"),
+      "tl" -> "Trim Left"(0: "Value"),
+    }
+  }
+
+  expr<float> "New U1" @(760, -960) {
+    expression = "u1 + tr * (min(u1, ju0) - u1)"
+    inputs {
+      "u1" -> "U1"(0: "Attribute"),
+      "ju0" -> "J U0"(0: "Value"),
+      "tr" -> "Trim Right"(0: "Value"),
+    }
+  }
+
+  expr<float> "New Act" @(1000, -900) {
+    expression =
+      "act * (1.0 - min(1.0, sw + ov * less_than(n1 - n0, m)))"
+    inputs {
+      "act" -> "Act"(0: "Attribute"),
+      "sw" -> "Swallowed"(0: "Value"),
+      "ov" -> "Overlap"(0: "Value"),
+      "n0" -> "New U0"(0: "Value"),
+      "n1" -> "New U1"(0: "Value"),
+      "m" -> "Group Input"("Min Width"),
+    }
+  }
+
+  node "W U0" [GeometryNodeStoreNamedAttribute] @(1240, 100) {
+    inputs {
+      (0: "Geometry") -> "Group Input"("Grid"),
+      (2: "Name") = "mas_u0",
+      (3: "Value") -> "New U0"(0: "Value"),
+    }
+  }
+
+  node "W U1" [GeometryNodeStoreNamedAttribute] @(1440, 100) {
+    inputs {
+      (0: "Geometry") -> "W U0"(0: "Geometry"),
+      (2: "Name") = "mas_u1",
+      (3: "Value") -> "New U1"(0: "Value"),
+    }
+  }
+
+  node "W Act" [GeometryNodeStoreNamedAttribute] @(1640, 100) {
+    data_type = "BOOLEAN"
+    inputs {
+      (0: "Geometry") -> "W U1"(0: "Geometry"),
+      (2: "Name") = "mas_act",
+      (3: "Value") -> "New Act"(0: "Value"),
+    }
+  }
+
+  node "Group Output" [NodeGroupOutput] @(1880, 100) {
+    inputs {
+      ("Grid") -> "W Act"(0: "Geometry"),
+    }
+  }
+}

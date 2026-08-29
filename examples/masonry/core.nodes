@@ -1,0 +1,102 @@
+// core.nodes — randomness shared by every masonry tool.
+//
+// All masonry randomness comes from one 4D white-noise hash addressed by three
+// coordinates plus a channel. Coordinates carry structural identity (run,
+// course, slot) and the channel separates decisions that share coordinates, so
+// a stone's width, its jumper flag and its chip all draw independently while
+// staying reproducible under the same Seed. Nothing else in the library calls
+// a noise node directly.
+
+tree "mas Hash" [GeometryNodeTree] {
+  interface {
+    inputs {
+      "X": [NodeSocketFloat],
+      "Y": [NodeSocketFloat],
+      "Z": [NodeSocketFloat],
+      "Channel": [NodeSocketFloat],
+      "Seed": [NodeSocketFloat],
+    }
+    outputs {
+      "Value": [NodeSocketFloat],
+    }
+  }
+
+  node "Group Input" [NodeGroupInput] @(-460, 0) {
+  }
+
+  node "Coord" [ShaderNodeCombineXYZ] @(-220, 100) {
+    inputs {
+      (0: "X") -> "Group Input"("X"),
+      (1: "Y") -> "Group Input"("Y"),
+      (2: "Z") -> "Group Input"("Z"),
+    }
+  }
+
+  expr<float> "W" @(-220, -120) {
+    expression = "seed * 77.7 + channel * 131.31"
+    inputs {
+      "seed" -> "Group Input"("Seed"),
+      "channel" -> "Group Input"("Channel"),
+    }
+  }
+
+  node "Noise" [ShaderNodeTexWhiteNoise] @(40, 0) {
+    noise_dimensions = "4D"
+    inputs {
+      (0: "Vector") -> "Coord"(0: "Vector"),
+      (1: "W") -> "W"(0: "Value"),
+    }
+  }
+
+  node "Group Output" [NodeGroupOutput] @(260, 0) {
+    inputs {
+      ("Value") -> "Noise"(0: "Value"),
+    }
+  }
+}
+
+tree "mas Hash Range" [GeometryNodeTree] {
+  interface {
+    inputs {
+      "X": [NodeSocketFloat],
+      "Y": [NodeSocketFloat],
+      "Z": [NodeSocketFloat],
+      "Channel": [NodeSocketFloat],
+      "Seed": [NodeSocketFloat],
+      "Min": [NodeSocketFloat] = 0.0,
+      "Max": [NodeSocketFloat] = 1.0,
+    }
+    outputs {
+      "Value": [NodeSocketFloat],
+    }
+  }
+
+  node "Group Input" [NodeGroupInput] @(-460, 0) {
+  }
+
+  node "Hash" [GeometryNodeGroup] @(-220, 60) {
+    node_tree = "mas Hash"
+    inputs {
+      ("X") -> "Group Input"("X"),
+      ("Y") -> "Group Input"("Y"),
+      ("Z") -> "Group Input"("Z"),
+      ("Channel") -> "Group Input"("Channel"),
+      ("Seed") -> "Group Input"("Seed"),
+    }
+  }
+
+  expr<float> "Value" @(40, 0) {
+    expression = "lo + h * (hi - lo)"
+    inputs {
+      "h" -> "Hash"(0: "Value"),
+      "lo" -> "Group Input"("Min"),
+      "hi" -> "Group Input"("Max"),
+    }
+  }
+
+  node "Group Output" [NodeGroupOutput] @(300, 0) {
+    inputs {
+      ("Value") -> "Value"(0: "Value"),
+    }
+  }
+}

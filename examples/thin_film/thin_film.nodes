@@ -1,0 +1,358 @@
+// examples/thin_film/thin_film.nodes
+//
+// Spectrally integrated thin-film interference. A dielectric film of
+// thickness d sits on a substrate; light reflects off both interfaces and
+// the two paths interfere, constructively at some wavelengths and
+// destructively at others. The visible colour is that reflectance spectrum
+// integrated against the eye's response.
+//
+// The film is lossless and non-dispersive, so the Airy summation collapses
+// to a closed form. For each interface and polarisation, r is the Fresnel
+// amplitude coefficient, and the round-trip phase through the film is
+//
+//   phi(lambda) = 4 pi n2 d cos(theta2) / lambda
+//
+//   R(lambda) = (r12^2 + r23^2 + 2 r12 r23 cos phi)
+//               ---------------------------------------
+//               (1 + r12^2 r23^2 + 2 r12 r23 cos phi)
+//
+// Everything outside the cosine is wavelength-independent, so the loop body
+// reduces to one cosine and two rational functions. The zone walks 32
+// wavelengths from 380nm to 730nm, converts each to a colour, and
+// accumulates two sums: the spectrum weighted by R, and the same spectrum
+// weighted by 1. Dividing one by the other at the end normalises the result
+// without needing to know how the Wavelength node is scaled — a film that
+// reflects everything comes out white.
+//
+// Blender's Principled and Metallic BSDFs have a thin film thickness input,
+// but the film IOR is the only other control and the integration is fixed.
+// Here the substrate IOR, the sample count and the spectral range are all
+// in the open.
+
+tree "Thin Film Spectral" [ShaderNodeTree] {
+  interface {
+    inputs {
+      "Thickness": [NodeSocketFloat] = 380.0,
+      "Film IOR": [NodeSocketFloat] = 1.45,
+      "Substrate IOR": [NodeSocketFloat] = 1.0,
+      "Cos Theta": [NodeSocketFloat] = 1.0,
+    }
+    outputs {
+      "Color": [NodeSocketColor],
+      "Reflectance": [NodeSocketFloat],
+    }
+  }
+
+  node "Group Input" [NodeGroupInput] @(-1700, 0) {
+  }
+
+  // ---- refraction angles --------------------------------------------------
+  //
+  // Snell from air: sin(theta_i) = sin(theta_1) / n_i, so
+  // cos(theta_i) = sqrt(1 - (1 - cos^2 theta_1) / n_i^2). The max() clamp
+  // holds cos at zero under total internal reflection, where the interface
+  // reflects with unit magnitude.
+
+  expr<float> "Cos Film" @(-1440, 320) {
+    expression = "sqrt(max(1.0 - (1.0 - c*c)/(n*n), 0.0))"
+    inputs {
+      "c" -> "Group Input"(3: "Cos Theta"),
+      "n" -> "Group Input"(1: "Film IOR"),
+    }
+  }
+
+  expr<float> "Cos Substrate" @(-1440, 60) {
+    expression = "sqrt(max(1.0 - (1.0 - c*c)/(n*n), 0.0))"
+    inputs {
+      "c" -> "Group Input"(3: "Cos Theta"),
+      "n" -> "Group Input"(2: "Substrate IOR"),
+    }
+  }
+
+  expr<float> "Phase Constant" @(-1440, -200) {
+    expression = "4.0*pi*n*d*c2"
+    inputs {
+      "n" -> "Group Input"(1: "Film IOR"),
+      "d" -> "Group Input"(0: "Thickness"),
+      "c2" -> "Cos Film"(0),
+    }
+  }
+
+  // ---- Fresnel amplitudes at the two interfaces ---------------------------
+
+  expr<float> "rs12" @(-1120, 620) {
+    expression = "(c1 - n2*c2)/(c1 + n2*c2)"
+    inputs {
+      "c1" -> "Group Input"(3: "Cos Theta"),
+      "n2" -> "Group Input"(1: "Film IOR"),
+      "c2" -> "Cos Film"(0),
+    }
+  }
+
+  expr<float> "rs23" @(-1120, 400) {
+    expression = "(n2*c2 - n3*c3)/(n2*c2 + n3*c3)"
+    inputs {
+      "n2" -> "Group Input"(1: "Film IOR"),
+      "c2" -> "Cos Film"(0),
+      "n3" -> "Group Input"(2: "Substrate IOR"),
+      "c3" -> "Cos Substrate"(0),
+    }
+  }
+
+  expr<float> "rp12" @(-1120, 180) {
+    expression = "(n2*c1 - c2)/(n2*c1 + c2)"
+    inputs {
+      "n2" -> "Group Input"(1: "Film IOR"),
+      "c1" -> "Group Input"(3: "Cos Theta"),
+      "c2" -> "Cos Film"(0),
+    }
+  }
+
+  expr<float> "rp23" @(-1120, -40) {
+    expression = "(n3*c2 - n2*c3)/(n3*c2 + n2*c3)"
+    inputs {
+      "n3" -> "Group Input"(2: "Substrate IOR"),
+      "c2" -> "Cos Film"(0),
+      "n2" -> "Group Input"(1: "Film IOR"),
+      "c3" -> "Cos Substrate"(0),
+    }
+  }
+
+  // ---- interference coefficients ------------------------------------------
+  //
+  // R(lambda) = (A + B cos phi) / (1 + B^2/4 + B cos phi), since the product
+  // r12^2 r23^2 is (B/2)^2. Both are constant across the spectrum, so they
+  // are computed once outside the zone.
+
+  expr<float> "As" @(-820, 520) {
+    expression = "a*a + b*b"
+    inputs {
+      "a" -> "rs12"(0),
+      "b" -> "rs23"(0),
+    }
+  }
+
+  expr<float> "Bs" @(-820, 300) {
+    expression = "2.0*a*b"
+    inputs {
+      "a" -> "rs12"(0),
+      "b" -> "rs23"(0),
+    }
+  }
+
+  expr<float> "Ap" @(-820, 80) {
+    expression = "a*a + b*b"
+    inputs {
+      "a" -> "rp12"(0),
+      "b" -> "rp23"(0),
+    }
+  }
+
+  expr<float> "Bp" @(-820, -140) {
+    expression = "2.0*a*b"
+    inputs {
+      "a" -> "rp12"(0),
+      "b" -> "rp23"(0),
+    }
+  }
+
+  // ---- spectral integration -----------------------------------------------
+  //
+  // 32 samples of the 380-730nm range, taken at bin midpoints: the first is
+  // 380 + 350/64 and each step advances by 350/32.
+
+  repeat "Spectrum" @(-500, -400) {
+    iterations = 32
+    items {
+      "Wavelength": [NodeSocketFloat] = 385.46875,
+      "Sum": [NodeSocketVector] = (0.0, 0.0, 0.0),
+      "White": [NodeSocketVector] = (0.0, 0.0, 0.0),
+    }
+
+    expr<float> "Cos Phase" @(-100, 400) {
+      expression = "cos(k / lam)"
+      inputs {
+        "k" -> "Phase Constant"(0),
+        "lam" -> "repeat"(0: "Wavelength"),
+      }
+    }
+
+    expr<float> "Reflectance Sample" @(180, 400) {
+      expression = "0.5*((as + bs*c)/(1.0 + 0.25*bs*bs + bs*c) + (ap + bp*c)/(1.0 + 0.25*bp*bp + bp*c))"
+      inputs {
+        "as" -> "As"(0),
+        "bs" -> "Bs"(0),
+        "ap" -> "Ap"(0),
+        "bp" -> "Bp"(0),
+        "c" -> "Cos Phase"(0),
+      }
+    }
+
+    node "Sample Color" [ShaderNodeWavelength] @(180, 60) {
+      inputs {
+        (0: "Wavelength") -> "repeat"(0: "Wavelength"),
+      }
+    }
+
+    node "Weighted" [ShaderNodeVectorMath] @(420, 200) {
+      operation = "SCALE"
+      inputs {
+        (0: "Vector") -> "Sample Color"(0: "Color"),
+        (3: "Scale") -> "Reflectance Sample"(0),
+      }
+    }
+
+    node "Accumulate" [ShaderNodeVectorMath] @(660, 200) {
+      operation = "ADD"
+      inputs {
+        (0: "Vector") -> "repeat"(1: "Sum"),
+        (1: "Vector") -> "Weighted"(0: "Vector"),
+      }
+    }
+
+    node "Accumulate White" [ShaderNodeVectorMath] @(660, -40) {
+      operation = "ADD"
+      inputs {
+        (0: "Vector") -> "repeat"(2: "White"),
+        (1: "Vector") -> "Sample Color"(0: "Color"),
+      }
+    }
+
+    expr<float> "Next Wavelength" @(420, -280) {
+      expression = "lam + step"
+      inputs {
+        "lam" -> "repeat"(0: "Wavelength"),
+        "step" = 10.9375,
+      }
+    }
+
+    outputs {
+      "Wavelength" -> "Next Wavelength"(0),
+      "Sum" -> "Accumulate"(0: "Vector"),
+      "White" -> "Accumulate White"(0: "Vector"),
+    }
+  }
+
+  // ---- normalisation ------------------------------------------------------
+
+  node "Normalise" [ShaderNodeVectorMath] @(1400, 100) {
+    operation = "DIVIDE"
+    inputs {
+      (0: "Vector") -> "Spectrum"(1: "Sum"),
+      (1: "Vector") -> "Spectrum"(2: "White"),
+    }
+  }
+
+  node "Luminance" [ShaderNodeRGBToBW] @(1640, -60) {
+    inputs {
+      (0: "Color") -> "Normalise"(0: "Vector"),
+    }
+  }
+
+  node "Group Output" [NodeGroupOutput] @(1900, 60) {
+    inputs {
+      (0: "Color") -> "Normalise"(0: "Vector"),
+      (1: "Reflectance") -> "Luminance"(0: "Val"),
+    }
+  }
+}
+
+// A soap bubble: film of water between air on both sides, so the substrate
+// IOR is 1.0 and the interference is the only thing colouring the surface.
+// Thickness varies over the surface the way a draining film does, which is
+// what produces the bands. Feed the output into a Material Output.
+
+tree "Soap Film" [ShaderNodeTree] {
+  interface {
+    inputs {
+      "Base Thickness": [NodeSocketFloat] = 520.0,
+      "Variation": [NodeSocketFloat] = 620.0,
+      "Noise Scale": [NodeSocketFloat] = 4.0,
+      "Film IOR": [NodeSocketFloat] = 1.33,
+      "Roughness": [NodeSocketFloat] = 0.02,
+    }
+    outputs {
+      "BSDF": [NodeSocketShader],
+    }
+  }
+
+  node "Group Input" [NodeGroupInput] @(-1400, 0) {
+  }
+
+  node "Geometry" [ShaderNodeNewGeometry] @(-1400, 460) {
+  }
+
+  node "Facing" [ShaderNodeVectorMath] @(-1140, 460) {
+    operation = "DOT_PRODUCT"
+    inputs {
+      (0: "Vector") -> "Geometry"(1: "Normal"),
+      (1: "Vector") -> "Geometry"(4: "Incoming"),
+    }
+  }
+
+  expr<float> "Cos Theta" @(-880, 460) {
+    expression = "min(max(abs(d), 0.001), 1.0)"
+    inputs {
+      "d" -> "Facing"(1: "Value"),
+    }
+  }
+
+  node "Coords" [ShaderNodeTexCoord] @(-1400, -320) {
+  }
+
+  node "Film Noise" [ShaderNodeTexNoise] @(-1140, -320) {
+    noise_dimensions = "3D"
+    noise_type = "FBM"
+    normalize = true
+    inputs {
+      (0: "Vector") -> "Coords"(3: "Object"),
+      (2: "Scale") -> "Group Input"(2: "Noise Scale"),
+      (3: "Detail") = 3.0,
+      (4: "Roughness") = 0.45,
+    }
+  }
+
+  expr<float> "Film Thickness" @(-820, -320) {
+    expression = "base + var*(n - 0.5)"
+    inputs {
+      "base" -> "Group Input"(0: "Base Thickness"),
+      "var" -> "Group Input"(1: "Variation"),
+      "n" -> "Film Noise"(0: "Factor"),
+    }
+  }
+
+  node "Film" [ShaderNodeGroup] @(-460, 60) {
+    node_tree = "Thin Film Spectral"
+    inputs {
+      ("Thickness") -> "Film Thickness"(0),
+      ("Film IOR") -> "Group Input"(3: "Film IOR"),
+      ("Substrate IOR") = 1.0,
+      ("Cos Theta") -> "Cos Theta"(0),
+    }
+  }
+
+  node "Reflection" [ShaderNodeBsdfAnisotropic] @(-140, 260) {
+    distribution = "MULTI_GGX"
+    inputs {
+      (0: "Color") -> "Film"("Color"),
+      (1: "Roughness") -> "Group Input"(4: "Roughness"),
+    }
+  }
+
+  node "Transmission" [ShaderNodeBsdfTransparent] @(-140, -140) {
+  }
+
+  node "Mix" [ShaderNodeMixShader] @(180, 60) {
+    inputs {
+      (0: "Factor") -> "Film"("Reflectance"),
+      (1: "Shader") -> "Transmission"(0: "BSDF"),
+      (2: "Shader") -> "Reflection"(0: "BSDF"),
+    }
+  }
+
+  node "Group Output" [NodeGroupOutput] @(460, 60) {
+    inputs {
+      (0: "BSDF") -> "Mix"(0: "Shader"),
+    }
+  }
+}

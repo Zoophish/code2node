@@ -1,0 +1,265 @@
+// partition.nodes — split a span into irregular pieces that sum to it exactly.
+//
+// The one idea the whole library is built on. Given a span, a slot index and a
+// raw (unnormalised) piece size per slot, Accumulate Field sums the raw sizes
+// per group and rescales them so the group's pieces tile the span with no gap
+// and no overhang. That exactness is what keeps courses level and runs ending
+// in whole blocks, and it is the same operation whether the span is a wall's
+// height cut into courses, a course cut into blocks, or (later) an arch's
+// sweep cut into voussoirs.
+//
+// Head and Tail reserve fixed-size pieces at the ends before the middle slots
+// share out what is left; the wall tool uses them for quoins. They are fitted
+// down if they would swallow more than 70% of the span, and when a group has
+// no middle slots at all they grow to cover the span between them, so a group
+// always tiles its span whatever the caller asks for.
+//
+// Evaluated as a field over whatever point cloud the caller stores it on:
+// Group ID selects which points accumulate together, so one cloud can hold
+// many independent partitions.
+
+tree "mas Span Partition" [GeometryNodeTree] {
+  interface {
+    inputs {
+      "Span": [NodeSocketFloat] = 1.0,
+      "Slot": [NodeSocketFloat] = 0.0,
+      "Count": [NodeSocketFloat] = 1.0,
+      "Group ID": [NodeSocketInt] = 0,
+      "Piece": [NodeSocketFloat] = 1.0,
+      "Enabled": [NodeSocketBool] = true,
+      "Head": [NodeSocketFloat] = 0.0,
+      "Tail": [NodeSocketFloat] = 0.0,
+    }
+    outputs {
+      "Start": [NodeSocketFloat],
+      "End": [NodeSocketFloat],
+      "Size": [NodeSocketFloat],
+      "Active": [NodeSocketBool],
+      "Is Head": [NodeSocketBool],
+      "Is Tail": [NodeSocketBool],
+    }
+  }
+
+  node "Group Input" [NodeGroupInput] @(-900, 0) {
+  }
+
+  // ---- fixed end pieces, fitted so they cannot swallow the span ----------
+
+  expr<float> "Fit" @(-660, 300) {
+    expression = "min(1.0, 0.7 * span / max(head + tail, 1e-9))"
+    inputs {
+      "span" -> "Group Input"("Span"),
+      "head" -> "Group Input"("Head"),
+      "tail" -> "Group Input"("Tail"),
+    }
+  }
+
+  expr<float> "Head Fit" @(-420, 380) {
+    expression = "head * fit"
+    inputs {
+      "head" -> "Group Input"("Head"),
+      "fit" -> "Fit"(0: "Value"),
+    }
+  }
+
+  expr<float> "Tail Fit" @(-420, 300) {
+    expression = "tail * fit"
+    inputs {
+      "tail" -> "Group Input"("Tail"),
+      "fit" -> "Fit"(0: "Value"),
+    }
+  }
+
+  expr<float> "Free" @(-200, 340) {
+    expression = "max(span - hf - tf, 0.0)"
+    inputs {
+      "span" -> "Group Input"("Span"),
+      "hf" -> "Head Fit"(0: "Value"),
+      "tf" -> "Tail Fit"(0: "Value"),
+    }
+  }
+
+  // ---- which slots are live, and what kind ------------------------------
+
+  expr<float> "Live" @(-660, 60) {
+    expression = "enabled * less_than(slot, count)"
+    inputs {
+      "enabled" -> "Group Input"("Enabled"),
+      "slot" -> "Group Input"("Slot"),
+      "count" -> "Group Input"("Count"),
+    }
+  }
+
+  expr<float> "Head Flag" @(-200, 140) {
+    expression = "live * greater_than(hf, 1e-9) * less_than(slot, 0.5)"
+    inputs {
+      "live" -> "Live"(0: "Value"),
+      "hf" -> "Head Fit"(0: "Value"),
+      "slot" -> "Group Input"("Slot"),
+    }
+  }
+
+  expr<float> "Tail Flag" @(-200, 40) {
+    expression = "live * greater_than(tf, 1e-9) * greater_than(slot, count - 1.5) * (1.0 - hd)"
+    inputs {
+      "live" -> "Live"(0: "Value"),
+      "tf" -> "Tail Fit"(0: "Value"),
+      "slot" -> "Group Input"("Slot"),
+      "count" -> "Group Input"("Count"),
+      "hd" -> "Head Flag"(0: "Value"),
+    }
+  }
+
+  expr<float> "Mid Flag" @(40, 90) {
+    expression = "live * (1.0 - hd) * (1.0 - tl)"
+    inputs {
+      "live" -> "Live"(0: "Value"),
+      "hd" -> "Head Flag"(0: "Value"),
+      "tl" -> "Tail Flag"(0: "Value"),
+    }
+  }
+
+  // ---- share the free span between the middle slots ---------------------
+
+  expr<float> "Contrib" @(280, 90) {
+    expression = "piece * mid"
+    inputs {
+      "piece" -> "Group Input"("Piece"),
+      "mid" -> "Mid Flag"(0: "Value"),
+    }
+  }
+
+  node "Acc" [GeometryNodeAccumulateField] @(520, 90) {
+    inputs {
+      (0: "Value") -> "Contrib"(0: "Value"),
+      (1: "Group ID") -> "Group Input"("Group ID"),
+    }
+  }
+
+  // no middle slots at all: the end pieces stretch to meet in the centre
+
+  expr<float> "No Mid" @(760, 240) {
+    expression = "less_than(total, 1e-9)"
+    inputs {
+      "total" -> "Acc"(2: "Total"),
+    }
+  }
+
+  expr<float> "Head Size" @(1000, 340) {
+    expression = "hf + nomid * free * hf / max(hf + tf, 1e-9)"
+    inputs {
+      "hf" -> "Head Fit"(0: "Value"),
+      "tf" -> "Tail Fit"(0: "Value"),
+      "free" -> "Free"(0: "Value"),
+      "nomid" -> "No Mid"(0: "Value"),
+    }
+  }
+
+  expr<float> "Tail Size" @(1000, 240) {
+    expression = "tf + nomid * free * tf / max(hf + tf, 1e-9)"
+    inputs {
+      "hf" -> "Head Fit"(0: "Value"),
+      "tf" -> "Tail Fit"(0: "Value"),
+      "free" -> "Free"(0: "Value"),
+      "nomid" -> "No Mid"(0: "Value"),
+    }
+  }
+
+  expr<float> "Scale" @(1000, 120) {
+    expression = "free * (1.0 - nomid) / max(total, 1e-9)"
+    inputs {
+      "free" -> "Free"(0: "Value"),
+      "nomid" -> "No Mid"(0: "Value"),
+      "total" -> "Acc"(2: "Total"),
+    }
+  }
+
+  // ---- the piece's place in the span ------------------------------------
+
+  expr<float> "Start" @(1260, 60) {
+    expression = "tl * (span - ts) + mid * (hs + trailing * scale)"
+    inputs {
+      "tl" -> "Tail Flag"(0: "Value"),
+      "mid" -> "Mid Flag"(0: "Value"),
+      "span" -> "Group Input"("Span"),
+      "ts" -> "Tail Size"(0: "Value"),
+      "hs" -> "Head Size"(0: "Value"),
+      "trailing" -> "Acc"(1: "Trailing"),
+      "scale" -> "Scale"(0: "Value"),
+    }
+  }
+
+  expr<float> "End" @(1260, -140) {
+    expression = "hd * hs + tl * span + mid * (hs + (trailing + piece) * scale)"
+    inputs {
+      "hd" -> "Head Flag"(0: "Value"),
+      "tl" -> "Tail Flag"(0: "Value"),
+      "mid" -> "Mid Flag"(0: "Value"),
+      "hs" -> "Head Size"(0: "Value"),
+      "span" -> "Group Input"("Span"),
+      "trailing" -> "Acc"(1: "Trailing"),
+      "piece" -> "Group Input"("Piece"),
+      "scale" -> "Scale"(0: "Value"),
+    }
+  }
+
+  expr<float> "Size" @(1520, -60) {
+    expression = "e - s"
+    inputs {
+      "e" -> "End"(0: "Value"),
+      "s" -> "Start"(0: "Value"),
+    }
+  }
+
+  node "Group Output" [NodeGroupOutput] @(1780, 0) {
+    inputs {
+      ("Start") -> "Start"(0: "Value"),
+      ("End") -> "End"(0: "Value"),
+      ("Size") -> "Size"(0: "Value"),
+      ("Active") -> "Live"(0: "Value"),
+      ("Is Head") -> "Head Flag"(0: "Value"),
+      ("Is Tail") -> "Tail Flag"(0: "Value"),
+    }
+  }
+}
+
+// Slot count for a span the caller wants filled with pieces of about Mean
+// size: at least one, never more than Cap, and reserving slots for whatever
+// fixed end pieces are asked for. Pairs with mas Span Partition — the two
+// always take the same Span, Head and Tail.
+tree "mas Slot Count" [GeometryNodeTree] {
+  interface {
+    inputs {
+      "Span": [NodeSocketFloat] = 1.0,
+      "Mean": [NodeSocketFloat] = 1.0,
+      "Cap": [NodeSocketFloat] = 48.0,
+      "Head": [NodeSocketFloat] = 0.0,
+      "Tail": [NodeSocketFloat] = 0.0,
+    }
+    outputs {
+      "Count": [NodeSocketFloat],
+    }
+  }
+
+  node "Group Input" [NodeGroupInput] @(-300, 0) {
+  }
+
+  expr<float> "Count" @(0, 0) {
+    expression =
+      "min(cap, greater_than(head, 1e-9) + greater_than(tail, 1e-9)
+           + max(1.0, round(max(span - head - tail, 0.0) / max(mean, 1e-6))))"
+    inputs {
+      "span" -> "Group Input"("Span"),
+      "mean" -> "Group Input"("Mean"),
+      "cap" -> "Group Input"("Cap"),
+      "head" -> "Group Input"("Head"),
+      "tail" -> "Group Input"("Tail"),
+    }
+  }
+
+  node "Group Output" [NodeGroupOutput] @(300, 0) {
+    inputs {
+      ("Count") -> "Count"(0: "Value"),
+    }
+  }
+}

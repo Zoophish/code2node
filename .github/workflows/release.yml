@@ -19,7 +19,11 @@ jobs:
 
       - name: Package the VS Code extension
         working-directory: vscode-nodes
-        run: npx --yes @vscode/vsce package --no-dependencies --allow-missing-repository -o ../dist/
+        run: |
+          mkdir -p ../dist
+          version=$(node -p "require('./package.json').version")
+          npx --yes @vscode/vsce package --no-dependencies --allow-missing-repository \
+            -o "../dist/blender-nodes-dsl-$version.vsix"
 
       - name: Package the Blender extension
         run: |

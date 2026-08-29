@@ -4,7 +4,9 @@
 
 Author Blender nodes as code instead of data files. Code2node is a library that serialises and compiles Blender node trees from a text based node language. It works with any node tree type that derives from Blender's `NodeTree`; i.e. shader, geometry, compositor, and custom tree types registered by other addons.
 
-## CLI
+## Overview
+
+### CLI
 
 ```bash
 # Generate schema for all node types (writes registry.json + browsable .nodetypes)
@@ -21,7 +23,7 @@ python3 code2node/cli.py -- validate material.nodes schema/node_schema/registry.
 python3 code2node/cli.py -- roundtrip material.nodes cleaned.nodes
 ```
 
-## VSCode Support
+### VSCode Support
 
 `vscode-nodes/` is a VS Code extension providing syntax highlighting, bracket matching, and folding for `.nodes` and `.nodetypes` files.
 
@@ -32,7 +34,7 @@ Extensions view (`...` menu > Install from VSIX) or the command line:
 code --install-extension blender-nodes-dsl-0.1.0.vsix
 ```
 
-## Blender Extension
+### Blender Extension
 
 Install `code2node-<version>.zip` from the latest release.
 
@@ -46,9 +48,61 @@ Install `code2node-<version>.zip` from the latest release.
 
 ## Node Language Reference
 
-### Comments
+The `.nodes` syntax is fundamentally based on block definitions, similar to JSON, supporting arbitrary node
+types which are registered in the schema. It contains extras such as a preprocessor, expressions
+and compile time constructs to improve compactness and legibility.
 
-Comments are `//` to end of line and `/* */` blocks.
+
+### Lexical elements
+
+**Keywords**
+
+| Keyword | Description |
+|---------|-------------|
+| `tree` | Declares a node tree |
+| `node` | Declares a node |
+| `frame` | Declares a frame |
+| `reroute` | Declares a reroute |
+| `repeat` | Declares a repeat zone |
+| `closure` | Declares a closure zone |
+| `expr` | Declares a formula, compiled to math nodes |
+| `import` | Imports trees from another module |
+| `inline` | Qualifies a declaration as compile time only, producing no datablock |
+| `interface` | Holds the `inputs`/`outputs` blocks of a tree's interface |
+| `inputs` | Lists input sockets of a node, `interface` or zone; bindings of an `expr` |
+| `outputs` | Lists output sockets, or a zone's result mappings |
+| `items` | Lists the values a `repeat` zone carries between iterations |
+| `children` | Lists the nodes a `frame` contains |
+
+**Syntax**
+
+| Form | Description |
+|------|---------|
+| `{ }` | Block body |
+| `[Type]` | Type identifier: a node type, or a socket type |
+| `<numeric type>` | Numeric type parameter, as on `expr<float>` |
+| `"..."` | Quoted string: the name of a declaration, or a string literal |
+| `(index)` | Socket by index |
+| `("Name")` | Socket by name |
+| `(index: "Name")` | Socket by index, annotated with the socket's name |
+| `->` | Connection, target on the left |
+| `=` | Literal value |
+| `@(x, y)` | Position, and optional size `w=` and `h=` |
+| `,` | Terminates entries in a block |
+| `:` | Binds a name to a type |
+| `.` | Separates module path segments in an `import` |
+| `//`, `/* */` | Comment to end of line, and block comment |
+| `#` | Preprocessor directive |
+
+**Literals**
+
+| Type | Examples | Description |
+|------|----------|-------|
+| Integer | `28`, `-4` | Digits with no point or exponent |
+| Float | `0.8`, `-2.5`, `1e3` | A point or an exponent makes it a float |
+| String | `"Base Color"` | Double quotes, with no escape sequences |
+| Boolean | `true`, `false` | |
+| Tuple | `(0.8, 0.8, 0.8, 1.0)` | Comma-separated values, for vectors and colours |
 
 ### Preprocessor
 
@@ -110,6 +164,28 @@ Names resolve on group instances, `Group Input`/`Group Output`, and
 or reordered. Validation compiles name refs to indices, and output files
 use indices.
 
+### Frames
+
+`children` lists the nodes a frame contains. `label` sets the text drawn on
+it, and is emitted only when it differs from the name.
+
+```
+frame "Setup" @(-600, 200) label="Base mesh" {
+  children {
+    "Line",
+    "Set Position",
+  }
+}
+```
+
+### Reroutes
+
+A reroute takes no block. `->` connects its input.
+
+```
+reroute "bus" @(-200, 0) -> "Set Position"(0)
+```
+
 ### Node Groups
 
 Groups define their interface and appear before the trees that reference
@@ -158,8 +234,9 @@ node "My Instance" [ShaderNodeGroup] {
 
 ### Inline Trees
 
-An `inline` tree exists at compile time only (does not generate a datablock). Each instance expands to a
-copy of the body, framed under the instance's name.
+An `inline` tree exists at compile time only (does not emit a datablock). Each instance expands to a
+copy of the body, framed under the instance's name. This can be used for tree reuse without polluting
+the datablocks in Blender.
 
 ```
 inline tree "Add One" [GeometryNodeTree] {
@@ -196,7 +273,7 @@ node takes the block's name. Free identifiers bind in `inputs` to a
 connection or a literal.
 
 Float functions are standard math shorthand (`sin`, `min`, `floor`,
-`cosh`, …), each a Math operation. Operators are `+ - * / % ^`, and `pi`,
+`cosh`, …). Operators are `+ - * / % ^`, and `pi`,
 `tau` and `e` are named constants.
 
 Int functions are `abs`, `sign`, `min`, `max`, `pow`, `multiply_add`,
@@ -340,18 +417,3 @@ node_schema/
 
 Socket indices come from the detail files, which list each variant's
 properties, enum values and sockets.
-
-## Module Structure
-
-| File | Purpose |
-|------|---------|
-| `core.py` | IR dataclasses and node tree ↔ IR conversion |
-| `preprocessor.py` | Source text substitution ahead of the parser |
-| `format.py` | Node language ↔ IR serialisation, schema text formatting |
-| `expr.py` | Formula compiler |
-| `expand.py` | Inline tree expansion |
-| `loader.py` | Cross-file imports and dependency resolution |
-| `schema.py` | `bpy` node type introspection and registry (requires Blender) |
-| `validate.py` | Offline validation of parsed trees against the registry |
-| `layout.py` | Automatic node layout solver |
-| `cli.py` | Headless Python CLI |
